@@ -1,0 +1,4 @@
+# Minimal config so `supabase functions deploy` knows which project to target.
+# This repo only uses the CLI for Edge Functions (record-pool-rate) — there's
+# no local Supabase stack (db, auth, etc.) being run from here.
+project_id = "ggapuomnnocuumwrgfnt"

@@ -41,3 +41,13 @@ example
 # generated native folders
 /ios
 /android
+
+# local env
+.env
+
+# generated locally by scripts/setup-testnet.mjs — contains TREASURY_SECRET,
+# never commit this (would leak the treasury private key)
+src/lib/stellar-config.ts
+
+# Supabase CLI local cache (project ref, pooler URL, tool versions)
+supabase/.temp/

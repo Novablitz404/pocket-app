@@ -1,56 +1,47 @@
-# Welcome to your Expo app 👋
+# Remitt
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+A custodial USDC wallet on Stellar (Expo / React Native), with Soroban-powered savings
+(Blend) and a Supabase Edge Functions backend.
 
-## Get started
+## What it does
 
-1. Install dependencies
+- **Wallet**: send, receive, and cash in/out USDC on Stellar. New accounts are lazily
+  activated — nothing touches the chain until the first deposit — with reserves
+  sponsored by Remitt's treasury so users never need to hold XLM.
+- **Earn**: deposit USDC into the [Blend](https://www.blend.capital) lending pool
+  (Soroban) to earn the pool's live supply APY; withdraw anytime.
+- **Custodial recovery**: a treasury co-signer (weight 2) on every user account backs
+  email-OTP + PIN account recovery, freeze, and close — no seed phrases.
+- **Server-side treasury**: privileged operations (fee-bumping user transactions,
+  account activation, recovery, closure) are signed by Supabase Edge Functions holding
+  the treasury key server-side — the app itself never ships the treasury secret.
 
-   ```bash
-   npm install
-   ```
+## Stack
 
-2. Start the app
+- Expo / React Native (`src/app` — file-based routing, `src/lib` — Stellar + Supabase
+  clients, `src/components`)
+- [`@stellar/stellar-sdk`](https://github.com/stellar/js-stellar-sdk) for building and
+  signing Stellar/Soroban transactions
+- Supabase: Postgres (directory, recovery PINs, notifications), Auth (email OTP),
+  Edge Functions (`supabase/functions/`) for treasury-signed operations, `pg_cron` for
+  scheduled jobs
 
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+## Setup
 
 ```bash
-npm run reset-project
+npm install
+node scripts/setup-testnet.mjs   # generates a fresh testnet treasury keypair and
+                                  # writes src/lib/stellar-config.ts (gitignored —
+                                  # never commit this file, it holds a private key)
+npx expo start
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Copy `.env.example`-style Supabase project URL/anon key into `.env`
+(`EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY`) and run
+`scripts/supabase-schema.sql` in the Supabase SQL editor. Deploy the Edge Functions in
+`supabase/functions/` with `npx supabase functions deploy <name>` and set
+`TREASURY_SECRET` via `npx supabase secrets set TREASURY_SECRET=...`.
 
-### Other setup steps
+## License
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
-
-## Learn more
-
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+MIT — see [LICENSE](./LICENSE).

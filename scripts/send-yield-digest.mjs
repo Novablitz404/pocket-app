@@ -1,0 +1,135 @@
+// Push a yield update to every Earn user: reads each address's live Blend
+// position from the Soroban RPC, subtracts the principal recorded in the
+// earn_positions ledger (see earn-ledger.ts), and notifies devices whose
+// earnings are at least a cent. Run manually or from cron, e.g. weekly:
+//
+//   node scripts/send-yield-digest.mjs
+//
+// Config comes from src/lib/stellar-config.ts + earn-blend.ts (same regex
+// trick as fund-treasury.mjs) and Supabase creds from packages/app/.env.
+import { Address, Asset, Networks, scValToNative, xdr } from '@stellar/stellar-sdk';
+import { readFileSync } from 'node:fs';
+
+const cfg = readFileSync(new URL('../src/lib/stellar-config.ts', import.meta.url), 'utf8');
+const pick = (name) => cfg.match(new RegExp(`${name} = '([^']+)'`))[1];
+const USDC_ISSUER = pick('USDC_ISSUER');
+const earnSrc = readFileSync(new URL('../src/lib/earn-blend.ts', import.meta.url), 'utf8');
+const POOL_ID = earnSrc.match(/POOL_ID = '([^']+)'/)[1];
+const SOROBAN_RPC = 'https://soroban-testnet.stellar.org';
+const USDC_SAC = new Asset('USDC', USDC_ISSUER).contractId(Networks.TESTNET);
+const SCALAR_12 = 10n ** 12n;
+
+const env = Object.fromEntries(
+  readFileSync(new URL('../.env', import.meta.url), 'utf8')
+    .split('\n')
+    .filter((l) => l.includes('=') && !l.trimStart().startsWith('#'))
+    .map((l) => [l.slice(0, l.indexOf('=')).trim(), l.slice(l.indexOf('=') + 1).trim()]),
+);
+const SUPABASE_URL = env.EXPO_PUBLIC_SUPABASE_URL;
+const ANON_KEY = env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+const headers = { apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}`, 'Content-Type': 'application/json' };
+const rest = (path) => `${SUPABASE_URL}/rest/v1/${path}`;
+
+async function rpcCall(method, params) {
+  const res = await fetch(SOROBAN_RPC, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+  });
+  const json = await res.json();
+  if (json.error) throw new Error(`${method}: ${json.error.message}`);
+  return json.result;
+}
+
+const b64 = (x) => Buffer.from(x.toXDR()).toString('base64');
+const poolDataKey = (sym, addr) =>
+  b64(
+    xdr.LedgerKey.contractData(
+      new xdr.LedgerKeyContractData({
+        contract: new Address(POOL_ID).toScAddress(),
+        key: xdr.ScVal.scvVec([xdr.ScVal.scvSymbol(sym), new Address(addr).toScVal()]),
+        durability: xdr.ContractDataDurability.persistent(),
+      }),
+    ),
+  );
+const mapGet = (m, i) =>
+  m instanceof Map ? (m.get(i) ?? m.get(String(i)) ?? 0n) : (m?.[i] ?? m?.[String(i)] ?? 0n);
+
+// Who's in Earn, and which devices can we reach?
+const [positionsRes, tokensRes] = await Promise.all([
+  fetch(rest('earn_positions?select=address,net_deposited&net_deposited=gt.0'), { headers }),
+  fetch(rest('push_tokens?select=address,token'), { headers }),
+]);
+if (!positionsRes.ok || !tokensRes.ok) throw new Error('Supabase read failed');
+const positions = await positionsRes.json();
+const tokensByAddress = {};
+for (const { address, token } of await tokensRes.json()) {
+  (tokensByAddress[address] ??= []).push(token);
+}
+console.log(`${positions.length} Earn position(s).`);
+if (positions.length === 0) process.exit(0);
+
+// Reserve state once, then each user's Positions entry (batched: the RPC
+// caps getLedgerEntries at 200 keys).
+const reserveKeys = [poolDataKey('ResData', USDC_SAC), poolDataKey('ResConfig', USDC_SAC)];
+const reserve = await rpcCall('getLedgerEntries', { keys: reserveKeys });
+const byKey = {};
+for (const e of reserve.entries ?? []) {
+  byKey[e.key] = scValToNative(xdr.LedgerEntryData.fromXDR(e.xdr, 'base64').contractData().val());
+}
+const resData = byKey[reserveKeys[0]];
+const resConfig = byKey[reserveKeys[1]];
+if (!resData || !resConfig) throw new Error('Blend reserve state unavailable');
+const reserveIndex = Number(resConfig.index);
+
+// Written for EVERY earning position (the in-app inbox works without push),
+// pushed only where a token is on file.
+const messages = [];
+const inboxRows = [];
+for (let i = 0; i < positions.length; i += 200) {
+  const batch = positions.slice(i, i + 200);
+  const keys = batch.map((p) => poolDataKey('Positions', p.address));
+  const result = await rpcCall('getLedgerEntries', { keys });
+  const posByKey = {};
+  for (const e of result.entries ?? []) {
+    posByKey[e.key] = scValToNative(xdr.LedgerEntryData.fromXDR(e.xdr, 'base64').contractData().val());
+  }
+  batch.forEach((p, idx) => {
+    const pos = posByKey[keys[idx]];
+    if (!pos) return;
+    const bTokens = mapGet(pos.supply, reserveIndex) || mapGet(pos.collateral, reserveIndex);
+    if (bTokens <= 0n) return;
+    const supplied = Number((bTokens * BigInt(resData.b_rate)) / SCALAR_12) / 1e7;
+    const earned = supplied - Number(p.net_deposited);
+    if (earned < 0.01) return;
+    const title = 'Your money is growing 🌱';
+    const body = `You've earned $${earned.toFixed(2)} in Earn so far. It compounds while you sleep.`;
+    const data = { type: 'yield', earned: Number(earned.toFixed(2)) };
+    inboxRows.push({ address: p.address, title, body, data });
+    for (const to of tokensByAddress[p.address] ?? []) {
+      messages.push({ to, title, body, sound: 'default', data });
+    }
+    console.log(`  ${p.address.slice(0, 6)}… earned $${earned.toFixed(2)}`);
+  });
+}
+
+console.log(`Writing ${inboxRows.length} inbox row(s), sending ${messages.length} push notification(s)...`);
+for (let i = 0; i < inboxRows.length; i += 500) {
+  await fetch(rest('notifications'), {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(inboxRows.slice(i, i + 500)),
+  });
+}
+for (let i = 0; i < messages.length; i += 100) {
+  const push = await fetch('https://exp.host/--/api/v2/push/send', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(messages.slice(i, i + 100)),
+  });
+  const json = await push.json();
+  for (const ticket of json.data ?? []) {
+    if (ticket.status === 'error') console.error(`  push error: ${ticket.message}`);
+  }
+}
+console.log('Done.');

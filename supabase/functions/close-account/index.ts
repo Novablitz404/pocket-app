@@ -1,12 +1,22 @@
 // Supabase Edge Function: Phase 1 of the mainnet build plan — closeAndReclaim
 // moves server-side (see ~/.claude/.../memory/mainnet-build-plan.md).
 //
-// Unlike fee-bump/activate-account, the treasury acts here with NO user
-// signature to lean on at all — it alone can sweep the balance, drop
-// signers, and merge the account (that's the whole point: it also has to
-// work for abandoned "ghost" accounts with no reachable owner). Once this
-// runs over a bare HTTP endpoint instead of only from the owning device, that
-// same feature becomes a way for ANY anon-key holder to grief-close anyone's
+// 2-of-3: closing sweeps the balance, drops the trustline + extra signers, and
+// merges the account — none of which the user has to be present for (that's
+// the whole point: it also has to work for abandoned "ghost" accounts with no
+// reachable owner). The account's own two service signers authorize it:
+// Remitt-KMS + compliance = weight 2 = threshold. The treasury only sources
+// the tx (fee payer) and receives the merged reserves; it is NOT a signer on
+// the user's account anymore.
+//
+// The extra signers ARE subentries, so accountMerge requires removing them
+// first — yet those same signatures authorize the merge. That's fine: Stellar
+// validates a tx's signatures against the account state at the START of the
+// transaction (verified on testnet), so zeroing Remitt-KMS + compliance in
+// earlier ops does not invalidate the weight-2 authorization of the merge.
+//
+// Because this runs over a bare HTTP endpoint (not only from the owning
+// device), it would otherwise let ANY anon-key holder grief-close anyone's
 // account. The gate: require the account's own recovery PIN (bcrypt-checked
 // server-side via verify_recovery_pin, same table/lockout `recover_profile`
 // already uses) — proof the caller is the owner, not just someone who knows
@@ -16,10 +26,12 @@
 //
 // Deploy (from packages/app):
 //   npx supabase functions deploy close-account
-//   (reuses TREASURY_SECRET; run the verify_recovery_pin block in
-//   supabase-schema.sql first)
+//   (needs TREASURY_SECRET [source/fee], COMPLIANCE_SECRET, GOOGLE_SA_JSON +
+//   REMITT_KMS_KEY_VERSION [Remitt co-signer]; run the verify_recovery_pin
+//   block in supabase-schema.sql first)
 import { Buffer } from 'node:buffer';
-import { Asset, BASE_FEE, Horizon, Keypair, Networks, Operation, TransactionBuilder } from 'npm:@stellar/stellar-sdk@^16';
+import { Asset, BASE_FEE, Horizon, Keypair, Networks, Operation, TransactionBuilder, xdr } from 'npm:@stellar/stellar-sdk@^16';
+import { kmsSign, REMITT_KMS_PUBLIC } from '../_shared/kms.ts';
 
 const HORIZON_URL = 'https://horizon-testnet.stellar.org';
 const NETWORK_PASSPHRASE = Networks.TESTNET;
@@ -31,6 +43,10 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const TREASURY_SECRET = Deno.env.get('TREASURY_SECRET')!;
 const treasury = Keypair.fromSecret(TREASURY_SECRET);
+// Compliance co-signer (testnet stand-in). In production this signature comes
+// from the organizationally-separate compliance holder, not an env secret.
+const COMPLIANCE_SECRET = Deno.env.get('COMPLIANCE_SECRET')!;
+const compliance = Keypair.fromSecret(COMPLIANCE_SECRET);
 
 const server = new Horizon.Server(HORIZON_URL);
 
@@ -78,9 +94,10 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: 'Wrong passcode.' }), { status: 403 });
     }
 
-    // Mirrors stellar.ts's old closeAndReclaim exactly, just executed here
-    // instead of on-device: sweep balance, flatten thresholds, drop the
-    // trustline, remove every non-master signer, merge into the treasury.
+    // Sweep balance, flatten thresholds, drop the trustline, remove every
+    // non-master signer (Remitt-KMS + compliance), and merge into the treasury.
+    // Authorized by those same two service signers (weight 2 = threshold),
+    // valid against the tx-start snapshot even as the ops remove them.
     const account = await server.loadAccount(address);
     const usdcLine = account.balances.find(
       (b: any) => b.asset_code === USDC_CODE && b.asset_issuer === USDC_ISSUER,
@@ -116,7 +133,15 @@ Deno.serve(async (req) => {
     builder.addOperation(Operation.accountMerge({ source: address, destination: treasury.publicKey() }));
 
     const tx = builder.setTimeout(60).build();
-    tx.sign(treasury);
+    // treasury (tx source + fee + merge destination) + compliance sign locally;
+    // the Remitt signature comes from KMS to reach the weight-2 threshold on
+    // the user's account.
+    tx.sign(treasury, compliance);
+    const kmsSig = await kmsSign(tx.hash());
+    tx.signatures.push(new xdr.DecoratedSignature({
+      hint: Keypair.fromPublicKey(REMITT_KMS_PUBLIC).signatureHint(),
+      signature: Buffer.from(kmsSig),
+    }));
     const result = await submitClassic(b64(tx.toEnvelope()));
     return new Response(JSON.stringify(result), { status: 200 });
   } catch (e) {

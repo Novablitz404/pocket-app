@@ -6,7 +6,6 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { AmountPad } from '@/components/amount-pad';
 import { Button } from '@/components/button';
 import { usePopup } from '@/components/popup';
-import { MIN_FIRST_DEPOSIT } from '@/lib/stellar';
 import { colors, formatUsd, radius } from '@/lib/theme';
 import { useWallet } from '@/lib/wallet-context';
 
@@ -17,21 +16,32 @@ const PARTNERS = [
 ];
 
 export default function AddCash() {
-  const { addCash, activated } = useWallet();
+  const { addCash, accountVerified, verifyAccount } = useWallet();
   const popup = usePopup();
   const [amount, setAmount] = useState('');
   const [partner, setPartner] = useState(PARTNERS[0].id);
   const [busy, setBusy] = useState(false);
+  const [verifying, setVerifying] = useState(false);
 
   const value = parseFloat(amount) || 0;
-  const belowMin = !activated && value < MIN_FIRST_DEPOSIT;
+
+  const onVerify = async () => {
+    setVerifying(true);
+    try {
+      await verifyAccount();
+    } catch (e: any) {
+      popup.alert({ title: 'Could not verify', message: e?.message ?? 'Please try again.' });
+    } finally {
+      setVerifying(false);
+    }
+  };
 
   const onAdd = async () => {
     setBusy(true);
     try {
       await addCash(value);
       await popup.alert({
-        title: activated ? 'Cash added' : 'Account opened',
+        title: 'Cash added',
         message: `${formatUsd(value)} is in your account.`,
         confirmText: 'Done',
       });
@@ -43,10 +53,31 @@ export default function AddCash() {
     }
   };
 
+  if (!accountVerified) {
+    return (
+      <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
+        <View style={styles.header}>
+          <Text style={styles.title}>Verify your account</Text>
+          <Pressable onPress={() => router.back()} hitSlop={12}>
+            <Ionicons name="close" size={26} color={colors.ink} />
+          </Pressable>
+        </View>
+        <View style={styles.amountWrap}>
+          <Text style={styles.balanceHint}>
+            Verifying opens your account and unlocks adding cash.
+          </Text>
+        </View>
+        <View style={styles.bottom}>
+          <Button title="Verify" onPress={onVerify} loading={verifying} />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       <View style={styles.header}>
-        <Text style={styles.title}>{activated ? 'Add cash' : 'Open your account'}</Text>
+        <Text style={styles.title}>Add cash</Text>
         <Pressable onPress={() => router.back()} hitSlop={12}>
           <Ionicons name="close" size={26} color={colors.ink} />
         </Pressable>
@@ -54,11 +85,6 @@ export default function AddCash() {
 
       <View style={styles.amountWrap}>
         <Text style={styles.amount}>${amount || '0'}</Text>
-        {!activated && (
-          <Text style={styles.balanceHint}>
-            Your first deposit opens your account · min {formatUsd(MIN_FIRST_DEPOSIT)}
-          </Text>
-        )}
       </View>
 
       <View style={styles.bottom}>
@@ -86,25 +112,13 @@ export default function AddCash() {
 
         <AmountPad value={amount} onChange={setAmount} />
         <Button
-          title={
-            !activated
-              ? value > 0
-                ? `Open account with ${formatUsd(value)}`
-                : 'Open account'
-              : value > 0
-                ? `Add ${formatUsd(value)}`
-                : 'Add cash'
-          }
+          title={value > 0 ? `Add ${formatUsd(value)}` : 'Add cash'}
           onPress={onAdd}
-          disabled={value <= 0 || belowMin}
+          disabled={value <= 0}
           loading={busy}
           style={{ marginTop: 8 }}
         />
-        <Text style={styles.finePrint}>
-          {activated
-            ? 'Funds are available the moment they arrive'
-            : 'We open your account and cover the network fees — no crypto needed'}
-        </Text>
+        <Text style={styles.finePrint}>Funds are available the moment they arrive</Text>
       </View>
     </SafeAreaView>
   );

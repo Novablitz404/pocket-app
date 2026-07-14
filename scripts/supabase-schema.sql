@@ -72,6 +72,31 @@ $$;
 revoke execute on function public.mark_email_verified() from public, anon;
 grant execute on function public.mark_email_verified() to authenticated;
 
+-- Gates cash-in: on-chain account activation now happens when the user
+-- verifies (see stellar.ts's activateAccount), not on first cash-in attempt.
+-- PLACEHOLDER, same as the app's other "click to verify" step for now — no
+-- real identity check backs this yet, it's just a user-initiated confirm.
+-- verify_account is anon-callable (same trust level as username
+-- registration) because there's no real verification behind it to protect
+-- yet. IMPORTANT: once this gates something with real financial/compliance
+-- stakes (a real KYC provider, or once cash-in moves server-side), this
+-- needs the SAME tightening mark_email_verified already got — an
+-- anon-callable flip of a trust-signal column is exactly the class of bug
+-- Phase 0 fixed for email_verified; don't leave this one open past the
+-- placeholder stage.
+alter table profiles add column if not exists account_verified boolean not null default false;
+
+create or replace function public.verify_account(p_address text)
+returns void
+language sql
+security definer
+set search_path = public
+as $$
+  update profiles set account_verified = true where address = p_address;
+$$;
+
+grant execute on function public.verify_account(text) to anon, authenticated;
+
 -- Recovery passcodes: the app's 4-digit PIN doubles as the second factor for
 -- account recovery (email OTP proves the inbox, the PIN proves it's you).
 -- Stored as a bcrypt hash. RLS is enabled with NO policies, so the REST API
@@ -415,3 +440,95 @@ create policy "avatars insert" on storage.objects
 drop policy if exists "avatars update" on storage.objects;
 create policy "avatars update" on storage.objects
   for update using (bucket_id = 'avatars') with check (bucket_id = 'avatars');
+
+-- Channel-account pool (Instawards D1 — concurrency fix for activate-account).
+-- A Stellar account can only have one transaction in flight at a time; using
+-- the treasury as activate-account's transaction source meant concurrent
+-- signups collided on its single sequence number (tx_bad_seq). This table
+-- holds a small pool of dedicated channel accounts (seeded by
+-- scripts/setup-channel-accounts.mjs) that each provide their OWN sequence
+-- number instead — the native Stellar pattern for this problem:
+-- developers.stellar.org/docs/build/guides/transactions/channel-accounts.
+--
+-- No anon/authenticated grants at all: only the reserve-channel and
+-- activate-account Edge Functions (service_role) ever touch this table.
+create table if not exists channel_accounts (
+  public_key   text primary key,
+  secret       text not null,
+  busy         boolean not null default false,
+  locked_until timestamptz,
+  created_at   timestamptz not null default now()
+);
+
+alter table channel_accounts enable row level security;
+
+-- Atomically claims one free (or stale-leased) channel account and marks it
+-- busy with a short lease — "skip locked" is what makes two concurrent
+-- reservations never race the same row. The lease self-heals a channel stuck
+-- busy if a request crashes before releasing it (release_channel_account
+-- below); activate-account still always calls that explicitly on its way
+-- out (success or failure) as the primary path, the lease is a backstop.
+create or replace function public.claim_channel_account(p_lease_seconds int default 60)
+returns table (public_key text, secret text)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_key text;
+begin
+  select ca.public_key into v_key
+  from channel_accounts ca
+  where not ca.busy or ca.locked_until < now()
+  order by ca.public_key
+  limit 1
+  for update skip locked;
+
+  if v_key is null then
+    raise exception 'no channel accounts available';
+  end if;
+
+  update channel_accounts
+    set busy = true, locked_until = now() + make_interval(secs => p_lease_seconds)
+    where channel_accounts.public_key = v_key;
+
+  return query select ca.public_key, ca.secret from channel_accounts ca where ca.public_key = v_key;
+end;
+$$;
+
+revoke execute on function public.claim_channel_account(int) from public, anon, authenticated;
+grant execute on function public.claim_channel_account(int) to service_role;
+
+-- Releases a channel account back to the pool. Called unconditionally
+-- (success or failure) by activate-account after it's done with a channel.
+create or replace function public.release_channel_account(p_public_key text)
+returns void
+language sql
+security definer
+set search_path = public
+as $$
+  update channel_accounts set busy = false, locked_until = null where public_key = p_public_key;
+$$;
+
+revoke execute on function public.release_channel_account(text) from public, anon, authenticated;
+grant execute on function public.release_channel_account(text) to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Account freeze list (2-of-3 custody). Freezing is enforced OFF-CHAIN: since
+-- every user send must be co-signed by Remitt-KMS in the fee-bump function,
+-- freezing an account is simply Remitt refusing to co-sign it — no on-chain
+-- transaction, no signer/threshold change. This table is the source of truth
+-- that fee-bump checks (assertNotFrozen) before adding its co-signature.
+--
+-- Keyed by on-chain address (not profile), so it works for any account whether
+-- or not it has a profiles row. RLS on with no anon/authenticated policies =>
+-- only service_role (the Edge Functions) can read/write; the anon key can't
+-- see or change the freeze list. Managed by the admin-only set-freeze function.
+create table if not exists public.frozen_accounts (
+  address    text primary key,
+  reason     text,
+  frozen_at  timestamptz not null default now()
+);
+alter table public.frozen_accounts enable row level security;
+revoke all on public.frozen_accounts from anon, authenticated;
+grant all on public.frozen_accounts to service_role;

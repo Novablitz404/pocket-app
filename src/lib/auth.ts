@@ -126,3 +126,20 @@ export async function markEmailVerified(accessToken: string): Promise<void> {
     // Best-effort.
   }
 }
+
+/** Placeholder account verification — no real identity check behind it yet,
+ *  just a user-initiated confirm that unlocks cash-in. Best-effort, same as
+ *  the other flag syncs above: the local flag in wallet-context is the
+ *  source of truth for this device's UI regardless of whether this succeeds. */
+export async function verifyAccount(address: string): Promise<void> {
+  if (!directoryEnabled) return;
+  try {
+    await fetch(`${SUPABASE_URL}/rest/v1/rpc/verify_account`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ p_address: address }),
+    });
+  } catch {
+    // Best-effort.
+  }
+}

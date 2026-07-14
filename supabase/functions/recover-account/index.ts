@@ -18,7 +18,8 @@
 //   npx supabase functions deploy recover-account
 //   (reuses TREASURY_SECRET)
 import { Buffer } from 'node:buffer';
-import { BASE_FEE, Horizon, Keypair, Networks, Operation, TransactionBuilder } from 'npm:@stellar/stellar-sdk@^16';
+import { BASE_FEE, Horizon, Keypair, Networks, Operation, TransactionBuilder, xdr } from 'npm:@stellar/stellar-sdk@^16';
+import { kmsSign, REMITT_KMS_PUBLIC } from '../_shared/kms.ts';
 
 const HORIZON_URL = 'https://horizon-testnet.stellar.org';
 const NETWORK_PASSPHRASE = Networks.TESTNET;
@@ -27,6 +28,10 @@ const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 const TREASURY_SECRET = Deno.env.get('TREASURY_SECRET')!;
 const treasury = Keypair.fromSecret(TREASURY_SECRET);
+// Compliance co-signer (testnet stand-in). In production this signature comes
+// from the organizationally-separate compliance holder, not an env secret.
+const COMPLIANCE_SECRET = Deno.env.get('COMPLIANCE_SECRET')!;
+const compliance = Keypair.fromSecret(COMPLIANCE_SECRET);
 
 const USER_MASTER_WEIGHT = 1;
 
@@ -89,10 +94,31 @@ Deno.serve(async (req) => {
       return new Response(JSON.stringify({ error: 'No recoverable account for this email' }), { status: 404 });
     }
 
-    // Mirrors stellar.ts's old recoverAccount exactly: treasury alone re-keys
-    // the account to the new device and disables the old master key.
+    // 2-of-3 recovery: the account's own signers (Remitt-KMS + compliance,
+    // weight 1 each = threshold 2) authorize swapping the user's key; the
+    // treasury only sources the tx and sponsors the new signer's reserve.
+    //
+    // We must revoke EVERY current user-controlled key, not just the master —
+    // otherwise a chain of recoveries leaves earlier device keys alive (the
+    // lost/compromised key the user is recovering AWAY from must die). So: add
+    // the new device signer, zero the master, AND zero any other weight-1
+    // signer that isn't Remitt-KMS / compliance / the new device key. All
+    // authorized against the tx-start snapshot, so removing signers mid-tx
+    // doesn't drop below the weight-2 threshold.
+    const compliancePub = compliance.publicKey();
+    const target = await server.loadAccount(address);
+    const priorUserSigners = target.signers.filter(
+      (s: any) =>
+        s.type === 'ed25519_public_key' &&
+        s.weight > 0 &&
+        s.key !== address && // master, handled by masterWeight: 0 below
+        s.key !== REMITT_KMS_PUBLIC &&
+        s.key !== compliancePub &&
+        s.key !== newDevicePublicKey,
+    );
+
     const source = await server.loadAccount(treasury.publicKey());
-    const tx = new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE })
+    const builder = new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE })
       .addOperation(Operation.beginSponsoringFutureReserves({ sponsoredId: address }))
       .addOperation(
         Operation.setOptions({
@@ -101,10 +127,19 @@ Deno.serve(async (req) => {
         }),
       )
       .addOperation(Operation.endSponsoringFutureReserves({ source: address }))
-      .addOperation(Operation.setOptions({ source: address, masterWeight: 0 }))
-      .setTimeout(60)
-      .build();
-    tx.sign(treasury);
+      .addOperation(Operation.setOptions({ source: address, masterWeight: 0 }));
+    for (const s of priorUserSigners) {
+      builder.addOperation(Operation.setOptions({ source: address, signer: { ed25519PublicKey: s.key, weight: 0 } }));
+    }
+    const tx = builder.setTimeout(60).build();
+    // treasury (tx source + sponsor) + compliance sign locally; the Remitt
+    // signature comes from KMS and is attached to reach the weight-2 threshold.
+    tx.sign(treasury, compliance);
+    const kmsSig = await kmsSign(tx.hash());
+    tx.signatures.push(new xdr.DecoratedSignature({
+      hint: Keypair.fromPublicKey(REMITT_KMS_PUBLIC).signatureHint(),
+      signature: Buffer.from(kmsSig),
+    }));
     const result = await submitClassic(b64(tx.toEnvelope()));
     return new Response(JSON.stringify({ ...result, address }), { status: 200 });
   } catch (e) {

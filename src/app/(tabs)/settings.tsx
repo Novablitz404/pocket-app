@@ -65,7 +65,7 @@ function Row({
 }
 
 export default function Settings() {
-  const { name, username, email, emailVerified, country, language, avatarUrl, balance, activated, setCountry, setLanguage, changeAvatar, closeAccount, reset } =
+  const { name, username, email, emailVerified, country, language, avatarUrl, accountVerified, balance, activated, setCountry, setLanguage, changeAvatar, closeAccount, reset } =
     useWallet();
   const popup = usePopup();
   const insets = useSafeAreaInsets();
@@ -137,7 +137,7 @@ export default function Settings() {
             disabled={uploading}
             style={({ pressed }) => [pressed && { opacity: 0.7 }, uploading && { opacity: 0.5 }]}
           >
-            <Avatar name={name ?? ''} uri={avatarUrl} size={64} />
+            <Avatar name={name ?? ''} uri={avatarUrl} size={64} verified={accountVerified} />
             <View style={styles.avatarBadge}>
               <Ionicons name="camera" size={12} color="#fff" />
             </View>

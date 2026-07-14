@@ -24,6 +24,7 @@ const FIRST_KEY = 'remitt.firstName';
 const LAST_KEY = 'remitt.lastName';
 const EMAIL_KEY = 'remitt.email';
 const EMAIL_VERIFIED_KEY = 'remitt.emailVerified';
+const ACCOUNT_VERIFIED_KEY = 'remitt.accountVerified';
 const COUNTRY_KEY = 'remitt.country';
 const LANGUAGE_KEY = 'remitt.language';
 const AVATAR_KEY = 'remitt.avatarUrl';
@@ -60,7 +61,8 @@ interface WalletState {
   balance: number;
   activity: ActivityItem[];
   refreshing: boolean;
-  activated: boolean; // account created on-chain (first deposit done)
+  activated: boolean; // account created on-chain
+  accountVerified: boolean; // user has clicked "verify" — gates cash-in; triggers on-chain activation
   balanceLoaded: boolean; // first balance fetch has resolved
   contacts: Contact[]; // accounts we've exchanged P2P payments with (on-device)
   toggleFavorite: (address: string) => Promise<void>;
@@ -82,6 +84,10 @@ interface WalletState {
    *  session verifyEmailOtp just returned — proves which email was verified
    *  server-side, since mark_email_verified() derives the address from it. */
   confirmEmailVerified: (accessToken: string) => Promise<void>;
+  /** Placeholder verification (no real identity check yet) — activates the
+   *  account on-chain (channel-account pool, sponsored reserves + trustline)
+   *  and unlocks cash-in. Idempotent: a no-op if already verified. */
+  verifyAccount: () => Promise<void>;
   refresh: () => Promise<void>;
   sendMoney: (to: string, amount: number) => Promise<void>;
   addCash: (amount: number) => Promise<void>;
@@ -110,6 +116,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [activity, setActivity] = useState<ActivityItem[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [activated, setActivated] = useState(false);
+  const [accountVerified, setAccountVerified] = useState(false);
   const [balanceLoaded, setBalanceLoaded] = useState(false);
   const [dir, setDir] = useState<Record<string, directory.Profile>>({});
   const [contacts, setContacts] = useState<Contact[]>([]);
@@ -119,7 +126,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     (async () => {
       try {
-        const [pub, storedUser, storedFirst, storedLast, storedEmail, storedVerified, storedCountry, storedLanguage, storedChangedAt, storedAvatar] = await Promise.all([
+        const [pub, storedUser, storedFirst, storedLast, storedEmail, storedVerified, storedCountry, storedLanguage, storedChangedAt, storedAvatar, storedAccountVerified] = await Promise.all([
           SecureStore.getItemAsync(PUBLIC_KEY),
           AsyncStorage.getItem(USERNAME_KEY),
           AsyncStorage.getItem(FIRST_KEY),
@@ -130,6 +137,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
           AsyncStorage.getItem(LANGUAGE_KEY),
           AsyncStorage.getItem(USERNAME_CHANGED_AT_KEY),
           AsyncStorage.getItem(AVATAR_KEY),
+          AsyncStorage.getItem(ACCOUNT_VERIFIED_KEY),
         ]);
         if (pub) {
           // Backfill accounts created before country capture existed.
@@ -145,6 +153,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
           setLanguageState(storedLanguage ?? 'en');
           setUsernameChangedAt(storedChangedAt ? Number(storedChangedAt) : null);
           setAvatarUrl(storedAvatar);
+          setAccountVerified(storedAccountVerified === '1');
           // Ensure the directory has this account (e.g. registered before the
           // directory existed) and load the current map.
           if (storedUser) {
@@ -452,6 +461,22 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     await fn(secret);
   }, []);
 
+  // Placeholder verification: activates the account on-chain (channel-account
+  // pool, sponsored reserves + trustline) and unlocks cash-in. No real
+  // identity check yet — see verify_account in supabase-schema.sql for the
+  // known gap this needs closing before it gates anything with real stakes.
+  const verifyAccount = useCallback(async () => {
+    if (!publicKey) throw new Error('No account on this device');
+    if (accountVerified) return;
+    if (!(await stellar.accountExists(publicKey))) {
+      await withSecret((secret) => stellar.activateAccount(secret));
+    }
+    setAccountVerified(true);
+    await AsyncStorage.setItem(ACCOUNT_VERIFIED_KEY, '1');
+    auth.verifyAccount(publicKey).catch(() => {});
+    await refresh();
+  }, [publicKey, accountVerified, withSecret, refresh]);
+
   const sendMoney = useCallback(
     async (to: string, amount: number) => {
       if (!publicKey) throw new Error('No account on this device');
@@ -472,15 +497,13 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const addCash = useCallback(
     async (amount: number) => {
       if (!publicKey) throw new Error('No account on this device');
-      if (!activated && amount < stellar.MIN_FIRST_DEPOSIT) {
-        throw new Error(
-          `Your first deposit opens your account. Add at least $${stellar.MIN_FIRST_DEPOSIT} to get started.`,
-        );
+      if (!accountVerified) {
+        throw new Error('Verify your account to enable cash-in.');
       }
       await withSecret((secret) => stellar.cashIn(publicKey, secret, amount));
       await refresh();
     },
-    [publicKey, activated, withSecret, refresh],
+    [publicKey, accountVerified, withSecret, refresh],
   );
 
   const reset = useCallback(async () => {
@@ -489,7 +512,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     await Promise.all([
       SecureStore.deleteItemAsync(SECRET_KEY),
       SecureStore.deleteItemAsync(PUBLIC_KEY),
-      AsyncStorage.multiRemove([USERNAME_KEY, FIRST_KEY, LAST_KEY, EMAIL_KEY, EMAIL_VERIFIED_KEY, COUNTRY_KEY, LANGUAGE_KEY, USERNAME_CHANGED_AT_KEY, AVATAR_KEY, EARN_KEY, contactsLib.CONTACTS_KEY]),
+      AsyncStorage.multiRemove([USERNAME_KEY, FIRST_KEY, LAST_KEY, EMAIL_KEY, EMAIL_VERIFIED_KEY, COUNTRY_KEY, LANGUAGE_KEY, USERNAME_CHANGED_AT_KEY, AVATAR_KEY, EARN_KEY, ACCOUNT_VERIFIED_KEY, contactsLib.CONTACTS_KEY]),
       clearPin(),
     ]);
     setUsername(null);
@@ -506,6 +529,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     setActivity([]);
     setContacts([]);
     setActivated(false);
+    setAccountVerified(false);
     setBalanceLoaded(false);
   }, []);
 
@@ -561,7 +585,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     await Promise.all([
       SecureStore.deleteItemAsync(SECRET_KEY),
       SecureStore.deleteItemAsync(PUBLIC_KEY),
-      AsyncStorage.multiRemove([USERNAME_KEY, FIRST_KEY, LAST_KEY, EMAIL_KEY, EMAIL_VERIFIED_KEY, COUNTRY_KEY, LANGUAGE_KEY, USERNAME_CHANGED_AT_KEY, AVATAR_KEY, EARN_KEY, contactsLib.CONTACTS_KEY]),
+      AsyncStorage.multiRemove([USERNAME_KEY, FIRST_KEY, LAST_KEY, EMAIL_KEY, EMAIL_VERIFIED_KEY, COUNTRY_KEY, LANGUAGE_KEY, USERNAME_CHANGED_AT_KEY, AVATAR_KEY, EARN_KEY, ACCOUNT_VERIFIED_KEY, contactsLib.CONTACTS_KEY]),
       clearPin(),
     ]);
     setUsername(null);
@@ -578,6 +602,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     setActivity([]);
     setContacts([]);
     setActivated(false);
+    setAccountVerified(false);
     setBalanceLoaded(false);
   }, [publicKey, activated]);
 
@@ -599,6 +624,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       activity,
       refreshing,
       activated,
+      accountVerified,
       balanceLoaded,
       contacts,
       toggleFavorite,
@@ -613,6 +639,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       setLanguage,
       changeAvatar,
       confirmEmailVerified,
+      verifyAccount,
       refresh,
       sendMoney,
       addCash,
@@ -622,7 +649,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       closeAccount,
       reset,
     }),
-    [loading, name, firstName, lastName, username, email, emailVerified, country, language, usernameChangedAt, avatarUrl, publicKey, balance, activity, refreshing, activated, balanceLoaded, contacts, toggleFavorite, nameFor, profileFor, createAccount, recoverExistingAccount, updateName, changeUsername, setCountry, setLanguage, changeAvatar, confirmEmailVerified, refresh, sendMoney, addCash, cashOut, earnDeposit, earnWithdraw, closeAccount, reset],
+    [loading, name, firstName, lastName, username, email, emailVerified, country, language, usernameChangedAt, avatarUrl, publicKey, balance, activity, refreshing, activated, accountVerified, balanceLoaded, contacts, toggleFavorite, nameFor, profileFor, createAccount, recoverExistingAccount, updateName, changeUsername, setCountry, setLanguage, changeAvatar, confirmEmailVerified, verifyAccount, refresh, sendMoney, addCash, cashOut, earnDeposit, earnWithdraw, closeAccount, reset],
   );
 
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;

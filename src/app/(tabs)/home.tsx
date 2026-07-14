@@ -18,7 +18,7 @@ const ACTIONS: { label: string; icon: keyof typeof Ionicons.glyphMap; href: stri
 ];
 
 export default function Home() {
-  const { name, avatarUrl, balance, activity, balanceLoaded, publicKey, refresh } = useWallet();
+  const { name, avatarUrl, accountVerified, balance, activity, balanceLoaded, publicKey, refresh } = useWallet();
   const insets = useSafeAreaInsets();
   const [refreshing, setRefreshing] = useState(false);
   const [hasUnread, setHasUnread] = useState(false);
@@ -52,7 +52,7 @@ export default function Home() {
           matching the Activity tab. */}
       <View style={styles.header}>
         <View style={styles.headerLeft}>
-          <Avatar name={name ?? ''} uri={avatarUrl} size={44} />
+          <Avatar name={name ?? ''} uri={avatarUrl} size={44} verified={accountVerified} />
           <Text style={styles.greeting}>{name ? `Hi, ${name.split(' ')[0]}` : 'Welcome'}</Text>
         </View>
         <View style={styles.headerRight}>

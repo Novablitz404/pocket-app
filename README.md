@@ -10,11 +10,20 @@ A custodial USDC wallet on Stellar (Expo / React Native), with Soroban-powered s
   sponsored by Remitt's treasury so users never need to hold XLM.
 - **Earn**: deposit USDC into the [Blend](https://www.blend.capital) lending pool
   (Soroban) to earn the pool's live supply APY; withdraw anytime.
-- **Custodial recovery**: a treasury co-signer (weight 2) on every user account backs
-  email-OTP + PIN account recovery, freeze, and close — no seed phrases.
-- **Server-side treasury**: privileged operations (fee-bumping user transactions,
-  account activation, recovery, closure) are signed by Supabase Edge Functions holding
-  the treasury key server-side — the app itself never ships the treasury secret.
+- **2-of-3 custody (multisig + KMS)**: every user account is a Stellar 2-of-3 — the
+  user's device key, a Remitt key held in Google Cloud KMS, and a compliance key (each
+  weight 1, thresholds 2/2/2). Any two can act; no single key can. The treasury only
+  sponsors reserves and pays gas — it is **not** a signer on user accounts, so a
+  treasury leak can't move user funds. Backs email-OTP + PIN recovery, freeze, and
+  close — no seed phrases.
+- **Server-side signing**: privileged operations (co-signing user sends via KMS,
+  account activation, recovery, closure, freeze) run in Supabase Edge Functions; the
+  Remitt signing key lives in Google Cloud KMS and never ships in the app bundle.
+
+See **[docs/security-custody.md](./docs/security-custody.md)** for the full custody
+design (signing model, key custody, per-flow diagrams, security properties) and
+**[docs/custody-testing.md](./docs/custody-testing.md)** for how each flow was verified
+on testnet.
 
 ## Stack
 

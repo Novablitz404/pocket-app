@@ -15,7 +15,7 @@
 //     needs XLM for fees either.
 import { Buffer } from 'buffer';
 import EventSource from 'react-native-sse';
-import { Asset, BASE_FEE, Horizon, Keypair, Memo, Networks, Operation, TransactionBuilder } from '@stellar/stellar-sdk';
+import { Account, Asset, BASE_FEE, Horizon, Keypair, Memo, Networks, Operation, TransactionBuilder } from '@stellar/stellar-sdk';
 import { POOL_ID as BLEND_POOL_ID } from './earn-blend.ts';
 import { ANON_KEY, SUPABASE_URL } from './directory.ts';
 import { HORIZON_URL, TREASURY_PUBLIC, TREASURY_SECRET, USDC_CODE, USDC_ISSUER } from './stellar-config.ts';
@@ -25,13 +25,18 @@ const NETWORK = Networks.TESTNET;
 const USDC = new Asset(USDC_CODE, USDC_ISSUER);
 const treasuryKp = () => Keypair.fromSecret(TREASURY_SECRET);
 
-// Treasury co-signer weight and account thresholds. med=1 lets the user
-// transact alone; high=2 means only the treasury (weight 2) can change
-// signers, freeze, or merge — the user can't lock the treasury out.
-const TREASURY_SIGNER_WEIGHT = 2;
+// 2-of-3 signer set: three weight-1 signers — the user's master key plus
+// Remitt's KMS-held signer and the compliance signer — with all thresholds at
+// 2, so any two can act and no single key can (the user can't send alone, and
+// neither can Remitt). The treasury is no longer a signer on user accounts; it
+// only sponsors reserves. These are public keys, not secrets — safe in the
+// client bundle. (TODO: move to stellar-config alongside TREASURY_PUBLIC.)
+const REMITT_SIGNER = 'GDBG6KN5PJ3JHAZSDVK5WN4ISCJYHAS4MB4ETB5CBI3P623P3APQI447';
+const COMPLIANCE_SIGNER = 'GCBIXSUNME5SKBMA6RCKEKF3PD35LFLTYW5YJNYBRHUUFL3CCFHWH55B';
+const SIGNER_WEIGHT = 1;
 const USER_MASTER_WEIGHT = 1;
-const THRESHOLD_LOW = 1;
-const THRESHOLD_MED = 1;
+const THRESHOLD_LOW = 2;
+const THRESHOLD_MED = 2;
 const THRESHOLD_HIGH = 2;
 
 // Minimum first deposit (USD) required to open an account. Product rule, not
@@ -151,13 +156,31 @@ export async function isFrozen(publicKey: string): Promise<boolean> {
  * signing rather than trusting the caller — that's the whole reason this
  * moved out of `activateAndFund`'s single combined tx with a payment op.
  */
-async function activateAccount(userSecret: string) {
+export async function activateAccount(userSecret: string) {
   const user = Keypair.fromSecret(userSecret);
-  const source = await server.loadAccount(TREASURY_PUBLIC);
+
+  // Reserve a channel account first: its sequence number is what this tx
+  // consumes (not the treasury's), so concurrent activations never collide.
+  // We can't build+sign below without knowing exactly which channel and
+  // sequence will be used — a signature covers the whole envelope, not a
+  // single operation, so there's no way to sign now and have any channel
+  // "fill in" later. See supabase/functions/reserve-channel.
+  const reserveRes = await fetch(`${SUPABASE_URL}/functions/v1/reserve-channel`, {
+    method: 'POST',
+    headers: { apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}` },
+  });
+  const reserved = await reserveRes.json();
+  if (!reserveRes.ok) throw new Error(reserved?.error ?? 'No channel account available');
+  const { channelPublicKey, sequence } = reserved;
+
+  const source = new Account(channelPublicKey, sequence);
   const tx = new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: NETWORK })
-    .addOperation(Operation.beginSponsoringFutureReserves({ sponsoredId: user.publicKey() }))
-    .addOperation(Operation.createAccount({ destination: user.publicKey(), startingBalance: '0' }))
+    .addOperation(Operation.beginSponsoringFutureReserves({ source: TREASURY_PUBLIC, sponsoredId: user.publicKey() }))
+    .addOperation(Operation.createAccount({ source: TREASURY_PUBLIC, destination: user.publicKey(), startingBalance: '0' }))
     .addOperation(Operation.changeTrust({ source: user.publicKey(), asset: USDC }))
+    // Two setOptions because each can add only one signer: op 3 sets the
+    // user's master weight + thresholds and adds Remitt-KMS; op 4 adds
+    // compliance. Ends as a 2-of-3 (user + Remitt-KMS + compliance).
     .addOperation(
       Operation.setOptions({
         source: user.publicKey(),
@@ -165,7 +188,13 @@ async function activateAccount(userSecret: string) {
         lowThreshold: THRESHOLD_LOW,
         medThreshold: THRESHOLD_MED,
         highThreshold: THRESHOLD_HIGH,
-        signer: { ed25519PublicKey: TREASURY_PUBLIC, weight: TREASURY_SIGNER_WEIGHT },
+        signer: { ed25519PublicKey: REMITT_SIGNER, weight: SIGNER_WEIGHT },
+      }),
+    )
+    .addOperation(
+      Operation.setOptions({
+        source: user.publicKey(),
+        signer: { ed25519PublicKey: COMPLIANCE_SIGNER, weight: SIGNER_WEIGHT },
       }),
     )
     .addOperation(Operation.endSponsoringFutureReserves({ source: user.publicKey() }))
@@ -176,7 +205,7 @@ async function activateAccount(userSecret: string) {
   const res = await fetch(`${SUPABASE_URL}/functions/v1/activate-account`, {
     method: 'POST',
     headers: { apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}`, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ innerXdr }),
+    body: JSON.stringify({ innerXdr, channelPublicKey }),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(data?.error ?? 'Account activation failed');
@@ -277,32 +306,14 @@ export async function cashOut(
   await feeBumpedUserPayment(accountPublicKey, signingSecret, TREASURY_PUBLIC, amount, memo);
 }
 
-// --- Custodial controls. The treasury is a signer (weight 2) on every user
-//     account, so it satisfies the high threshold and can act alone. In
-//     production these keys live server-side behind auth; here they run
-//     client-side for the demo. ---
-
-/** Treasury-authored setOptions on a user account (treasury signs alone). */
-async function treasurySetOptions(userPublicKey: string, opts: Record<string, unknown>) {
-  const treasury = treasuryKp();
-  const source = await server.loadAccount(treasury.publicKey());
-  const tx = new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: NETWORK })
-    .addOperation(Operation.setOptions({ source: userPublicKey, ...opts }))
-    .setTimeout(60)
-    .build();
-  tx.sign(treasury);
-  await submit(tx);
-}
-
-/** Freeze: raise the med threshold so the user can't move funds without us. */
-export async function freezeAccount(userPublicKey: string) {
-  await treasurySetOptions(userPublicKey, { medThreshold: TREASURY_SIGNER_WEIGHT });
-}
-
-/** Unfreeze: restore normal thresholds. */
-export async function unfreezeAccount(userPublicKey: string) {
-  await treasurySetOptions(userPublicKey, { medThreshold: THRESHOLD_MED });
-}
+// --- Custodial controls. Under the 2-of-3 design, freeze is no longer an
+//     on-chain threshold change: since every user send already requires
+//     Remitt's KMS co-signature, freezing an account is simply Remitt's
+//     backend refusing to co-sign (a `frozen` flag checked before the co-sign
+//     Edge Function signs). That's on-chain-enforced (the user's lone weight-1
+//     key can't meet the threshold-2, even submitting directly to Horizon) and
+//     needs no transaction — so the old freezeAccount/unfreezeAccount/
+//     treasurySetOptions helpers are gone. ---
 
 /**
  * Recovery: re-key the account to a new device via the recover-account Edge

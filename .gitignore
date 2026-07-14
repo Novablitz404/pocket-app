@@ -51,3 +51,8 @@ src/lib/stellar-config.ts
 
 # Supabase CLI local cache (project ref, pooler URL, tool versions)
 supabase/.temp/
+
+# custody test scripts — kept local, not committed (carry testnet keys/paths and
+# hit live deployed functions). Their coverage is documented in
+# docs/custody-testing.md instead.
+scripts/custody-2of3/

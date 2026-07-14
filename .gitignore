@@ -56,3 +56,7 @@ supabase/.temp/
 # hit live deployed functions). Their coverage is documented in
 # docs/custody-testing.md instead.
 scripts/custody-2of3/
+
+# editor / assistant local config
+.vscode/
+.claude/

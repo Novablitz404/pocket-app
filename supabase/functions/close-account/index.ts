@@ -24,14 +24,25 @@
 // abandoned) still closes with no PIN, matching today's client-side
 // behavior; that's a deliberate, pre-existing tradeoff, not a new one.
 //
+// CONCURRENCY FIX (channel-account pool): the transaction SOURCE is a claimed
+// channel account, not the treasury — each concurrent close gets its own
+// sequence number instead of colliding on the treasury's single one
+// (tx_bad_seq). Every op is already sourced from the account being closed, and
+// the treasury is only the accountMerge DESTINATION (+ USDC sweep recipient) —
+// neither role needs the treasury to sign, so with the channel as tx source
+// the treasury is no longer a signer here at all (signing it anyway would be a
+// tx_bad_auth_extra). See _shared/channels.ts.
+//
 // Deploy (from packages/app):
 //   npx supabase functions deploy close-account
-//   (needs TREASURY_SECRET [source/fee], COMPLIANCE_SECRET, GOOGLE_SA_JSON +
-//   REMITT_KMS_KEY_VERSION [Remitt co-signer]; run the verify_recovery_pin
-//   block in supabase-schema.sql first)
+//   (needs TREASURY_SECRET [merge dest/fee-bump elsewhere], COMPLIANCE_SECRET,
+//   GOOGLE_SA_JSON + REMITT_KMS_KEY_VERSION [Remitt co-signer]; run the
+//   verify_recovery_pin block in supabase-schema.sql; also needs the
+//   channel_accounts table + claim/release RPCs + a seeded pool)
 import { Buffer } from 'node:buffer';
 import { Asset, BASE_FEE, Horizon, Keypair, Networks, Operation, TransactionBuilder, xdr } from 'npm:@stellar/stellar-sdk@^16';
 import { kmsSign, REMITT_KMS_PUBLIC } from '../_shared/kms.ts';
+import { claimChannel, releaseChannel } from '../_shared/channels.ts';
 
 const HORIZON_URL = 'https://horizon-testnet.stellar.org';
 const NETWORK_PASSPHRASE = Networks.TESTNET;
@@ -84,6 +95,7 @@ async function submitClassic(envelopeB64: string) {
 }
 
 Deno.serve(async (req) => {
+  let channelPublicKey: string | undefined;
   try {
     const { address, pin } = await req.json();
     if (typeof address !== 'string') {
@@ -104,7 +116,15 @@ Deno.serve(async (req) => {
     );
     const balance = usdcLine ? parseFloat(usdcLine.balance) : 0;
 
-    const source = await server.loadAccount(treasury.publicKey());
+    // A claimed channel account is the tx SOURCE (its sequence gets consumed),
+    // so concurrent closes don't collide on the treasury's sequence. The
+    // treasury stays only the merge destination + USDC-sweep recipient (both
+    // set explicitly on the ops below), so it doesn't sign this tx.
+    const channel = await claimChannel();
+    channelPublicKey = channel.publicKey;
+    const channelKp = Keypair.fromSecret(channel.secret);
+
+    const source = await server.loadAccount(channelPublicKey);
     const builder = new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE });
 
     if (balance > 0.0000001) {
@@ -133,10 +153,10 @@ Deno.serve(async (req) => {
     builder.addOperation(Operation.accountMerge({ source: address, destination: treasury.publicKey() }));
 
     const tx = builder.setTimeout(60).build();
-    // treasury (tx source + fee + merge destination) + compliance sign locally;
-    // the Remitt signature comes from KMS to reach the weight-2 threshold on
-    // the user's account.
-    tx.sign(treasury, compliance);
+    // channel (tx source + fee) + compliance sign locally; the Remitt signature
+    // comes from KMS to reach the weight-2 threshold on the user's account. The
+    // treasury is only the merge destination here, so it does NOT sign.
+    tx.sign(channelKp, compliance);
     const kmsSig = await kmsSign(tx.hash());
     tx.signatures.push(new xdr.DecoratedSignature({
       hint: Keypair.fromPublicKey(REMITT_KMS_PUBLIC).signatureHint(),
@@ -146,5 +166,7 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify(result), { status: 200 });
   } catch (e) {
     return new Response(JSON.stringify({ error: String(e) }), { status: 500 });
+  } finally {
+    if (channelPublicKey) await releaseChannel(channelPublicKey);
   }
 });

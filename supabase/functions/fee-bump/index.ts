@@ -42,12 +42,17 @@
 import { Buffer } from 'node:buffer';
 import { Keypair, Networks, TransactionBuilder, Transaction, hash, xdr } from 'npm:@stellar/stellar-sdk@^16';
 import { kmsSign, REMITT_KMS_PUBLIC } from '../_shared/kms.ts';
+import { displayName, notifyAddress } from '../_shared/notify.ts';
 
 const HORIZON_URL = 'https://horizon-testnet.stellar.org';
 const SOROBAN_RPC = 'https://soroban-testnet.stellar.org';
 const NETWORK_PASSPHRASE = Networks.TESTNET;
 const USDC_CODE = 'USDC';
 const USDC_ISSUER = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
+// Mirrors stellar.ts's FEE_MEMO — marks Remitt's own internal fee collections
+// (e.g. the Earn withdrawal fee), which also land at the treasury but are NOT
+// user cash-outs, so they must NOT be enqueued as off-ramp payouts.
+const FEE_MEMO = 'remitt-fee';
 
 const TREASURY_SECRET = Deno.env.get('TREASURY_SECRET')!;
 const treasury = Keypair.fromSecret(TREASURY_SECRET);
@@ -183,6 +188,60 @@ async function submitSoroban(envelopeB64: string) {
   return { hash: json.result.hash, status: json.result.status };
 }
 
+/** The tx's text memo as a plain string, or undefined for none/non-text. Used
+ *  to tell an internal fee collection (FEE_MEMO) apart from a real cash-out. */
+function memoText(inner: Transaction): string | undefined {
+  const m: any = inner.memo;
+  const type = m?.type ?? m?._type;
+  if (!m || type === 'none' || type === undefined) return undefined;
+  const v = m.value ?? m._value;
+  if (v == null) return undefined;
+  return Buffer.isBuffer(v) ? v.toString('utf8') : String(v);
+}
+
+/** Records a user cash-out (USDC → treasury) as a pending off-ramp payout for
+ *  the operator dashboard to disburse — the settlement-detection step the
+ *  off-ramp blocker needs. Idempotent on tx_hash (unique), so a retry or the
+ *  reconciliation watcher can't double-enqueue. Best-effort. */
+async function enqueueOfframp(address: string, amount: string, memo: string | undefined, txHash: string): Promise<void> {
+  await fetch(`${SUPABASE_URL}/rest/v1/offramp_payouts`, {
+    method: 'POST',
+    headers: {
+      apikey: SERVICE_ROLE_KEY,
+      Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+      'Content-Type': 'application/json',
+      Prefer: 'resolution=ignore-duplicates',
+    },
+    body: JSON.stringify({ address, amount: Number(amount), memo: memo ?? null, tx_hash: txHash, status: 'pending' }),
+  }).catch(() => {});
+}
+
+/** After a classic send settles on-chain, emit the server-side side effects the
+ *  client used to (spoofably) trigger itself: a "money received" notification to
+ *  the recipient of a P2P send, or an off-ramp payout row for a cash-out to the
+ *  treasury. Runs post-submit; strictly best-effort so it can never fail a send
+ *  that already settled. */
+async function emitClassicSideEffects(inner: Transaction, txHash: string): Promise<void> {
+  const memo = memoText(inner);
+  const sender = inner.source;
+  const treasuryPub = treasury.publicKey();
+  for (const op of inner.operations) {
+    if (op.type !== 'payment') continue;
+    const dest = (op as any).destination as string;
+    const amount = (op as any).amount as string;
+    if (dest === treasuryPub) {
+      if (memo === FEE_MEMO) continue; // internal fee collection, not a cash-out
+      await enqueueOfframp(sender, amount, memo, txHash);
+    } else {
+      const name = await displayName(sender);
+      await notifyAddress(dest, 'Money received 💸', `${name} sent you $${Number(amount).toFixed(2)}`, {
+        type: 'received',
+        from: sender,
+      });
+    }
+  }
+}
+
 Deno.serve(async (req) => {
   try {
     const { innerXdr, target } = await req.json();
@@ -221,6 +280,12 @@ Deno.serve(async (req) => {
 
     const envelope = feeBumpEnvelope(inner, totalFee);
     const result = target === 'classic' ? await submitClassic(envelope) : await submitSoroban(envelope);
+    // Post-settlement, server-authoritative side effects (receive notification /
+    // off-ramp enqueue). Best-effort — the payment already settled on-chain, so
+    // a failure here must not turn a successful send into an error response.
+    if (target === 'classic') {
+      await emitClassicSideEffects(inner, result.hash).catch(() => {});
+    }
     return new Response(JSON.stringify(result), { status: 200 });
   } catch (e) {
     return new Response(JSON.stringify({ error: String(e) }), { status: 500 });

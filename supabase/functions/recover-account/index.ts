@@ -14,12 +14,23 @@
 // anyone but the person who already passed that email's OTP, mirroring
 // recover_profile's own `auth.jwt() ->> 'email'` pattern.
 //
+// CONCURRENCY FIX (channel-account pool): the transaction SOURCE is a claimed
+// channel account, not the treasury — each concurrent recovery gets its own
+// sequence number instead of colliding on the treasury's single one
+// (tx_bad_seq). The treasury keeps its sponsor role (it still pays the new
+// signer's reserve), so beginSponsoringFutureReserves now needs an EXPLICIT
+// source = treasury (it used to default to the tx source, which was the
+// treasury). See _shared/channels.ts.
+//
 // Deploy (from packages/app):
 //   npx supabase functions deploy recover-account
-//   (reuses TREASURY_SECRET)
+//   (reuses TREASURY_SECRET; also needs the channel_accounts table + claim/
+//   release RPCs from supabase-schema.sql, and a pool seeded via
+//   scripts/setup-channel-accounts.mjs)
 import { Buffer } from 'node:buffer';
 import { BASE_FEE, Horizon, Keypair, Networks, Operation, TransactionBuilder, xdr } from 'npm:@stellar/stellar-sdk@^16';
 import { kmsSign, REMITT_KMS_PUBLIC } from '../_shared/kms.ts';
+import { claimChannel, releaseChannel } from '../_shared/channels.ts';
 
 const HORIZON_URL = 'https://horizon-testnet.stellar.org';
 const NETWORK_PASSPHRASE = Networks.TESTNET;
@@ -78,6 +89,7 @@ async function submitClassic(envelopeB64: string) {
 }
 
 Deno.serve(async (req) => {
+  let channelPublicKey: string | undefined;
   try {
     const { accessToken, newDevicePublicKey } = await req.json();
     if (typeof accessToken !== 'string' || typeof newDevicePublicKey !== 'string') {
@@ -117,9 +129,17 @@ Deno.serve(async (req) => {
         s.key !== newDevicePublicKey,
     );
 
-    const source = await server.loadAccount(treasury.publicKey());
+    // A claimed channel account is the tx SOURCE (its sequence gets consumed),
+    // so concurrent recoveries don't collide on the treasury's sequence. The
+    // treasury stays the reserve SPONSOR — hence the explicit source on
+    // beginSponsoringFutureReserves below.
+    const channel = await claimChannel();
+    channelPublicKey = channel.publicKey;
+    const channelKp = Keypair.fromSecret(channel.secret);
+
+    const source = await server.loadAccount(channelPublicKey);
     const builder = new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: NETWORK_PASSPHRASE })
-      .addOperation(Operation.beginSponsoringFutureReserves({ sponsoredId: address }))
+      .addOperation(Operation.beginSponsoringFutureReserves({ source: treasury.publicKey(), sponsoredId: address }))
       .addOperation(
         Operation.setOptions({
           source: address,
@@ -132,9 +152,10 @@ Deno.serve(async (req) => {
       builder.addOperation(Operation.setOptions({ source: address, signer: { ed25519PublicKey: s.key, weight: 0 } }));
     }
     const tx = builder.setTimeout(60).build();
-    // treasury (tx source + sponsor) + compliance sign locally; the Remitt
-    // signature comes from KMS and is attached to reach the weight-2 threshold.
-    tx.sign(treasury, compliance);
+    // channel (tx source) + treasury (sponsor) + compliance sign locally; the
+    // Remitt signature comes from KMS and is attached to reach the weight-2
+    // threshold on the user's account.
+    tx.sign(channelKp, treasury, compliance);
     const kmsSig = await kmsSign(tx.hash());
     tx.signatures.push(new xdr.DecoratedSignature({
       hint: Keypair.fromPublicKey(REMITT_KMS_PUBLIC).signatureHint(),
@@ -144,5 +165,7 @@ Deno.serve(async (req) => {
     return new Response(JSON.stringify({ ...result, address }), { status: 200 });
   } catch (e) {
     return new Response(JSON.stringify({ error: String(e) }), { status: 500 });
+  } finally {
+    if (channelPublicKey) await releaseChannel(channelPublicKey);
   }
 });

@@ -481,17 +481,14 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     async (to: string, amount: number) => {
       if (!publicKey) throw new Error('No account on this device');
       await withSecret((secret) => stellar.send(publicKey, secret, to, amount));
-      // Tell the recipient's phone, even if their app is closed. Fire-and-
-      // forget — the payment already settled on-chain.
-      push.notifyAddress(
-        to,
-        'Money received 💸',
-        `${name ?? 'Someone'} sent you $${amount.toFixed(2)}`,
-        { type: 'received', from: publicKey },
-      );
+      // The recipient's "Money received" notification is now emitted server-side
+      // by the fee-bump Edge Function, right after the payment settles on-chain
+      // (see supabase/functions/fee-bump). That's unspoofable — it can't be
+      // forged by a client POST — and also fires for cash-ins, unlike this old
+      // sender-triggered call. So there's nothing to notify from here anymore.
       await refresh();
     },
-    [publicKey, name, withSecret, refresh],
+    [publicKey, withSecret, refresh],
   );
 
   const addCash = useCallback(

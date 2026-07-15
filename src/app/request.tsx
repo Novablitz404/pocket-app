@@ -9,7 +9,6 @@ import { AmountPad } from '@/components/amount-pad';
 import { Avatar } from '@/components/avatar';
 import { Button } from '@/components/button';
 import { usePopup } from '@/components/popup';
-import { notifyAddress } from '@/lib/notifications';
 import { createRequest } from '@/lib/requests';
 import { colors, formatUsd, radius } from '@/lib/theme';
 import { useWallet } from '@/lib/wallet-context';
@@ -77,13 +76,9 @@ export default function Request() {
         popup.alert({ title: "That's you", message: 'You can’t request money from yourself.' });
         return;
       }
-      const request = await createRequest(publicKey, destination, askValue, note.trim() || undefined);
-      notifyAddress(
-        destination,
-        'Payment request 💌',
-        `${name ?? 'Someone'} asked you for ${formatUsd(askValue)}${note.trim() ? ` · ${note.trim()}` : ''}`,
-        { type: 'request', requestId: request.id, from: publicKey, fromName: name, amount: askValue.toFixed(2) },
-      );
+      // create-request writes the row AND emits the payer's notification
+      // server-side (unspoofable), so there's nothing to notify from here.
+      await createRequest(publicKey, destination, askValue, note.trim() || undefined);
       await popup.alert({
         title: 'Request sent',
         message: `${label ?? 'They'} will see it in Remitt${note.trim() ? '.' : ' and get a notification.'}`,

@@ -36,8 +36,11 @@ function fromRow(r: any): PaymentRequest {
   };
 }
 
-/** Ask someone for money: writes the row the payer's Activity tab and the
- *  push notification both read from. */
+/** Ask someone for money. Goes through the create-request Edge Function, which
+ *  writes the row AND emits the payer's notification server-side (service_role)
+ *  — the `requests`/`notifications` tables no longer accept anon INSERTs, so a
+ *  request (and any notification) can't be forged by a bare client POST. The
+ *  function handles the notification itself; callers should NOT also notify. */
 export async function createRequest(
   fromAddress: string,
   toAddress: string,
@@ -45,19 +48,16 @@ export async function createRequest(
   note?: string,
 ): Promise<PaymentRequest> {
   if (!directoryEnabled) throw new Error('Requests are not available right now.');
-  const res = await fetch(rest(TABLE), {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/create-request`, {
     method: 'POST',
-    headers: { ...headers, Prefer: 'return=representation' },
-    body: JSON.stringify({
-      from_address: fromAddress,
-      to_address: toAddress,
-      amount: amount.toFixed(2),
-      note: note?.trim() || null,
-    }),
+    headers,
+    body: JSON.stringify({ fromAddress, toAddress, amount, note: note?.trim() || null }),
   });
-  if (!res.ok) throw new Error(`Could not create the request (${res.status})`);
-  const rows = await res.json();
-  return fromRow(rows[0]);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body?.error ?? `Could not create the request (${res.status})`);
+  }
+  return fromRow(await res.json());
 }
 
 /** Unexpired pending requests asking this address for money, newest first. */

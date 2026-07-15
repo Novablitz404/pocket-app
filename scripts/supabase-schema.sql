@@ -282,11 +282,18 @@ alter table requests enable row level security;
 drop policy if exists "requests read" on requests;
 create policy "requests read" on requests for select using (true);
 
+-- Phase 3: creating a request moved server-side (create-request Edge Function,
+-- service_role) so a request row + its notification are written together and
+-- can't be forged by a bare anon POST. Anon INSERT is revoked.
 drop policy if exists "requests insert" on requests;
-create policy "requests insert" on requests for insert with check (true);
 
+-- Anon may still mark a request paid/declined, but ONLY the status column
+-- (column grant below), so amount/from/to can't be rewritten after the fact.
 drop policy if exists "requests update" on requests;
 create policy "requests update" on requests for update using (true) with check (true);
+revoke insert on requests from anon, authenticated;
+revoke update on requests from anon, authenticated;
+grant update (status) on requests to anon, authenticated;
 
 -- In-app notification inbox: written alongside every push send (same title/
 -- body/data any given push carries), so events show up in the bell icon even
@@ -310,11 +317,26 @@ alter table notifications enable row level security;
 drop policy if exists "notifications read" on notifications;
 create policy "notifications read" on notifications for select using (true);
 
+-- Phase 3: notifications are now written ONLY server-side (service_role) — by
+-- fee-bump after a real on-chain settlement ("Money received"), the on-ramp
+-- delivery path (cash-in), and create-request (payment requests). Anon INSERT
+-- is revoked so a "money received" claim can no longer be forged by POSTing
+-- straight to this table. (Read is left open pending the per-user-identity
+-- model — see the RLS follow-up note at the end of this file.)
 drop policy if exists "notifications insert" on notifications;
-create policy "notifications insert" on notifications for insert with check (true);
 
+-- Anon may still mark a notification read, but ONLY the `read` column (column
+-- grant below), so an attacker can't rewrite an existing row's title/body into
+-- a fake alert.
 drop policy if exists "notifications update" on notifications;
 create policy "notifications update" on notifications for update using (true) with check (true);
+-- Revoke from BOTH anon AND authenticated: a user can obtain an authenticated
+-- JWT via email OTP, and Supabase grants `authenticated` table privileges by
+-- default, so revoking only anon would leave the forge-a-notification hole open
+-- to any logged-in token. service_role (the Edge Functions) keeps its grants.
+revoke insert on notifications from anon, authenticated;
+revoke update on notifications from anon, authenticated;
+grant update (read) on notifications to anon, authenticated;
 
 -- Earn growth history: an append-only log of each user's own (supplied,
 -- net_deposited) pair, so the Earn screen can chart earnings over time.
@@ -368,8 +390,12 @@ alter table blend_pool_rates enable row level security;
 drop policy if exists "blend_pool_rates read" on blend_pool_rates;
 create policy "blend_pool_rates read" on blend_pool_rates for select using (true);
 
+-- Phase 3: this APY history is pool-wide and shown to EVERY Earn user, so a
+-- forged row is a shared-integrity problem (a fake yield line for everyone).
+-- Only the record-pool-rate Edge Function (service_role, pg_cron every 15 min)
+-- should write it — revoke the demo-grade anon INSERT.
 drop policy if exists "blend_pool_rates insert" on blend_pool_rates;
-create policy "blend_pool_rates insert" on blend_pool_rates for insert with check (true);
+revoke insert on blend_pool_rates from anon, authenticated;
 
 -- Schedule the deployed Edge Function every 15 minutes via pg_cron + pg_net.
 -- Run this block AFTER `supabase functions deploy record-pool-rate` (it's a
@@ -532,3 +558,50 @@ create table if not exists public.frozen_accounts (
 alter table public.frozen_accounts enable row level security;
 revoke all on public.frozen_accounts from anon, authenticated;
 grant all on public.frozen_accounts to service_role;
+
+-- ---------------------------------------------------------------------------
+-- Off-ramp payout queue (Phase 3). A cash-out sends the user's USDC to the
+-- treasury on Stellar; nothing yet converts that to fiat. fee-bump — the choke
+-- point every user cash-out passes through — writes a pending row here the
+-- moment it submits such a payment (see emitClassicSideEffects), so an operator
+-- (Phase 2.1 dashboard) can disburse the fiat and mark it paid. This is the
+-- settlement-detection step the off-ramp mainnet blocker needs; the same row is
+-- what a partner-specific disbursement call would consume later.
+--
+-- tx_hash is unique so the enqueue is idempotent — a fee-bump retry or the
+-- reconciliation watcher (which re-scans the treasury's incoming USDC) can
+-- upsert without creating duplicate payouts. RLS on, service_role only (the
+-- dashboard reads/writes it through an admin-gated Edge Function, never the
+-- browser directly).
+create table if not exists public.offramp_payouts (
+  id            uuid primary key default gen_random_uuid(),
+  address       text not null,                 -- the user who cashed out (payment source)
+  amount        numeric not null check (amount > 0),  -- USDC delivered to the treasury
+  memo          text,                          -- cash-out memo / destination tag, if any
+  tx_hash       text not null unique,          -- settlement tx (dedup key)
+  status        text not null default 'pending' check (status in ('pending', 'paid', 'failed')),
+  operator_note text,
+  created_at    timestamptz not null default now(),
+  paid_at       timestamptz
+);
+create index if not exists offramp_payouts_status_idx on public.offramp_payouts (status, created_at);
+alter table public.offramp_payouts enable row level security;
+revoke all on public.offramp_payouts from anon, authenticated;
+grant all on public.offramp_payouts to service_role;
+
+-- ---------------------------------------------------------------------------
+-- RLS FOLLOW-UP (Phase 3 residual — needs the per-user identity model, tracked
+-- separately). The custodial app authenticates to Supabase with the shared anon
+-- key, so RLS can't yet scope rows to their owner. Phase 3 closed the writes
+-- that let anyone forge a MONEY-MOVEMENT claim (notifications/requests INSERT →
+-- server-only; blend_pool_rates INSERT → cron-only). Still open, and deliberately
+-- left until per-user JWTs exist:
+--   * notifications/requests/profiles SELECT are open (using(true)) — a privacy
+--     leak (read others' rows), not a spoof. Scope to auth.uid once users carry
+--     their own JWT.
+--   * push_tokens (register/update/delete open) — registering a token for
+--     someone else's address could hijack their push. Bundle with Phase 5 push
+--     activation (identity + address-ownership check), since push is dormant in
+--     Expo Go today.
+--   * earn_snapshots INSERT open — a user can only distort their OWN earnings
+--     graph, so it's self-harm; move server-side when Earn settlement does.

@@ -1,9 +1,10 @@
 # Pocket
 
-A custodial USDC wallet on Stellar (Expo / React Native), with Soroban-powered savings
-(Blend) and a Supabase Edge Functions backend. Pocket is a cash-app-style wallet: send
+A self-custodial USDC wallet on Stellar (Expo / React Native), with Soroban-powered
+savings and a Supabase Edge Functions backend. Pocket is a cash-app-style wallet: send
 money to a username, hold a dollar balance, earn yield, and cash in/out to local rails —
-without the user ever touching a seed phrase or holding XLM for gas.
+without the user ever touching a seed phrase or holding XLM for gas. No single party,
+Pocket included, can unilaterally move a user's funds.
 
 > **Status:** invite-only beta, testnet. Mainnet launch is gated on the checklist tracked
 > internally (key custody hardening, ramp integration, app-store distribution).

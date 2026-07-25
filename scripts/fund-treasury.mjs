@@ -18,7 +18,7 @@ const cfg = readFileSync(new URL('../src/lib/stellar-config.ts', import.meta.url
 const pick = (name) => cfg.match(new RegExp(`${name} = '([^']+)'`))[1];
 const HORIZON_URL = pick('HORIZON_URL');
 const USDC_ISSUER = pick('USDC_ISSUER');
-const TREASURY_SECRET = pick('TREASURY_SECRET');
+const { TREASURY_SECRET } = await import('./treasury-secret.mjs');
 
 const want = process.argv[2] ?? '1000';
 const server = new Horizon.Server(HORIZON_URL);

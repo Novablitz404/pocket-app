@@ -1,16 +1,41 @@
-import { useFocusEffect } from 'expo-router';
-import React, { useCallback, useState } from 'react';
-import { Image, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { router, useFocusEffect } from 'expo-router';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Button } from '@/components/button';
-import { type ChartPoint, EarnChart } from '@/components/earn-chart';
 import { usePopup } from '@/components/popup';
+import { type SnapshotPoint, SavingsChart, bucketize } from '@/components/savings-chart';
 import { Skeleton } from '@/components/skeleton';
-import { ensureUnlocked } from '@/lib/biometrics';
-import { FALLBACK_APY, WITHDRAW_FEE_RATE, getEarnState } from '@/lib/earn-blend';
-import { getNetDeposited, getPoolRates, getSnapshots, maybeRecordSnapshot, type PoolRate } from '@/lib/earn-ledger';
+import { FALLBACK_APY, getEarnState } from '@/lib/earn-blend';
+import { getNetDeposited, getSnapshots, maybeRecordSnapshot } from '@/lib/earn-ledger';
+import { formatLocal } from '@/lib/fx';
 import { colors, formatUsd, radius } from '@/lib/theme';
+import { consumePendingHomeRange } from '@/lib/ui-state';
 import { useWallet } from '@/lib/wallet-context';
+
+const RANGES = ['1W', '1M', '1Y', 'All'] as const;
+type Range = (typeof RANGES)[number];
+
+const DAY_MS = 24 * 3600 * 1000;
+// Window length and bar count per range: 1W reads as one bar per day.
+const RANGE_CONFIG: Record<Range, { ms: number; bars: number }> = {
+  '1W': { ms: 7 * DAY_MS, bars: 7 },
+  '1M': { ms: 30 * DAY_MS, bars: 10 },
+  '1Y': { ms: 365 * DAY_MS, bars: 12 },
+  All: { ms: Infinity, bars: 12 },
+};
+
+// Last-known earn data, cached on-device per address so re-opening the tab
+// paints the balance and chart instantly instead of flashing blank while the
+// network catches up. The live fetch still runs on focus and overwrites this.
+const cacheKey = (address: string) => `earn:home:${address}`;
+interface HomeCache {
+  supplied: number;
+  apy: number;
+  netDeposited: number | null;
+  snapshots: SnapshotPoint[];
+}
 
 /** Dollar format with enough precision for small accruals (e.g. $0.0031). */
 function formatEarnings(amount: number): string {
@@ -18,35 +43,42 @@ function formatEarnings(amount: number): string {
   return formatUsd(amount);
 }
 
-/** The pool-rate history is its own timeline (written independently by
- *  scripts/record-pool-rate.mjs), so a user's balance snapshot rarely lands
- *  on the exact same instant as a rate row — find whichever rate point is
- *  closest in time instead of requiring an exact match. */
-function nearestApy(rates: PoolRate[], t: number): number | null {
-  if (rates.length === 0) return null;
-  let best = rates[0];
-  let bestDist = Math.abs(new Date(best.createdAt).getTime() - t);
-  for (const r of rates) {
-    const d = Math.abs(new Date(r.createdAt).getTime() - t);
-    if (d < bestDist) {
-      best = r;
-      bestDist = d;
-    }
-  }
-  return best.apy;
+function formatDay(t: number): string {
+  return new Date(t).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+// Baseline-aligned placeholder bars, so the first-ever load reads as a chart
+// warming up rather than an empty gap. Heights are static (a rising shape).
+const SKELETON_BARS = [64, 96, 78, 132, 118, 168, 150];
+function ChartSkeleton() {
+  return (
+    <View style={styles.chartSkeleton}>
+      {SKELETON_BARS.map((h, i) => (
+        <View key={i} style={styles.chartSkeletonSlot}>
+          <Skeleton width="100%" height={h} radius={12} />
+        </View>
+      ))}
+    </View>
+  );
 }
 
 export default function Earn() {
-  const { balance, publicKey, activated, earnDeposit, earnWithdraw } = useWallet();
+  const { publicKey, activated, localCurrency, localRate, refresh } = useWallet();
   const popup = usePopup();
   const insets = useSafeAreaInsets();
+
   const [supplied, setSupplied] = useState(0);
   const [apy, setApy] = useState(FALLBACK_APY);
   const [netDeposited, setNetDeposited] = useState<number | null>(null);
-  const [chartPoints, setChartPoints] = useState<ChartPoint[]>([]);
+  const [snapshots, setSnapshots] = useState<SnapshotPoint[]>([]);
   const [loadingState, setLoadingState] = useState(true);
-  const [amount, setAmount] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [range, setRange] = useState<Range>('1W');
+  const [selectedBar, setSelectedBar] = useState<number | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Once the live fetch has landed we stop letting the cache read (which may
+  // resolve later) clobber fresher on-chain values.
+  const hydratedRef = useRef(false);
 
   const load = useCallback(async () => {
     if (!publicKey || !activated) {
@@ -55,174 +87,198 @@ export default function Earn() {
     }
     try {
       const [s, net] = await Promise.all([getEarnState(publicKey), getNetDeposited(publicKey)]);
+      hydratedRef.current = true;
       setSupplied(s.supplied);
       setApy(s.apy);
       setNetDeposited(net);
-      // Fire-and-forget: log today's point (own balance, per-user), then load
-      // this user's history plus the pool's rate history (written separately
-      // by scripts/record-pool-rate.mjs — see nearestApy above) to annotate
-      // the chart tooltip with what the rate actually was at each point.
+      setLoadingState(false);
+      // Fire-and-forget: log today's point, then load the history that feeds
+      // the bar chart (balance plus principal, so buckets can tell deposits
+      // and withdrawals apart from interest).
       maybeRecordSnapshot(publicKey, s.supplied, net ?? 0).catch(() => {});
-      Promise.all([getSnapshots(publicKey), getPoolRates()])
-        .then(([snaps, rates]) =>
-          setChartPoints(
-            snaps.map((snap) => {
-              const t = new Date(snap.createdAt).getTime();
-              return { t, v: snap.earned, apy: nearestApy(rates, t) };
-            }),
-          ),
-        )
+      getSnapshots(publicKey)
+        .then((snaps) => {
+          const points = snaps.map((snap) => ({
+            t: new Date(snap.createdAt).getTime(),
+            v: snap.supplied,
+            net: snap.netDeposited,
+          }));
+          setSnapshots(points);
+          AsyncStorage.setItem(
+            cacheKey(publicKey),
+            JSON.stringify({ supplied: s.supplied, apy: s.apy, netDeposited: net, snapshots: points }),
+          ).catch(() => {});
+        })
         .catch(() => {});
     } catch {
       // leave last-known values
-    } finally {
       setLoadingState(false);
     }
   }, [publicKey, activated]);
 
+  // Paint last-known values immediately on mount so the tab never opens blank;
+  // the live fetch above replaces them a moment later.
+  useEffect(() => {
+    if (!publicKey || !activated) return;
+    let cancelled = false;
+    AsyncStorage.getItem(cacheKey(publicKey))
+      .then((raw) => {
+        if (cancelled || !raw || hydratedRef.current) return;
+        const c: HomeCache = JSON.parse(raw);
+        setSupplied(c.supplied);
+        setApy(c.apy);
+        setNetDeposited(c.netDeposited);
+        setSnapshots(c.snapshots ?? []);
+        setLoadingState(false);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [publicKey, activated]);
+
   useFocusEffect(
     useCallback(() => {
-      setLoadingState(true);
+      // The simulate screen's range pills hand their pick back through here.
+      const pending = consumePendingHomeRange();
+      if (pending) {
+        setRange(pending);
+        setSelectedBar(null);
+      }
       load();
     }, [load]),
   );
 
-  const onDeposit = async () => {
-    const value = parseFloat(amount);
-    if (!value || value <= 0) return;
-    if (value > balance) {
-      popup.alert({
-        title: 'Not enough balance',
-        message: `You can move up to ${formatUsd(balance)} into Earn.`,
-      });
-      return;
-    }
-    if (!(await ensureUnlocked(`Move ${formatUsd(value)} into Earn`))) return;
-    setBusy(true);
-    try {
-      await earnDeposit(value);
-      setAmount('');
-      await load();
-      popup.alert({ title: 'Now earning', message: `${formatUsd(value)} is earning yield in Blend.` });
-    } catch (e: any) {
-      popup.alert({ title: 'Deposit failed', message: e?.message ?? 'Please try again.' });
-    } finally {
-      setBusy(false);
-    }
+  const bars = useMemo(() => {
+    if (snapshots.length === 0) return [];
+    const { ms, bars: count } = RANGE_CONFIG[range];
+    const end = Date.now();
+    const start = ms === Infinity ? snapshots[0].t : end - ms;
+    return bucketize(snapshots, count, start, end);
+  }, [snapshots, range]);
+
+  const onPickRange = (r: Range) => {
+    setRange(r);
+    setSelectedBar(null);
   };
 
-  const onWithdraw = async () => {
-    const estimatedFee = supplied * WITHDRAW_FEE_RATE;
-    const ok = await popup.confirm({
-      title: 'Withdraw everything?',
-      message: 'Your Earn balance returns to your account instantly.',
-      rows: [
-        { label: 'Withdraw', value: formatUsd(supplied) },
-        { label: `Fee (${(WITHDRAW_FEE_RATE * 100).toFixed(1)}%)`, value: `-${formatUsd(estimatedFee)}` },
-        { label: 'You receive', value: formatUsd(supplied - estimatedFee), emphasize: true },
-      ],
-      confirmText: 'Withdraw',
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([refresh(), load()]);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refresh, load]);
+
+  const onApyInfo = () =>
+    popup.alert({
+      title: `Earning ${(apy * 100).toFixed(2)}% APY`,
+      message:
+        'Your savings are supplied to the Blend lending pool on Stellar and earn its live rate. The rate moves with the pool; interest accrues continuously and you can withdraw anytime.',
     });
-    if (!ok) return;
-    if (!(await ensureUnlocked('Withdraw from Earn'))) return;
 
-    setBusy(true);
-    try {
-      const { withdrawn, fee } = await earnWithdraw();
-      await load();
-      await popup.alert({
-        title: 'Withdrawn',
-        message: `${formatUsd(withdrawn - fee)} returned to your balance.`,
-      });
-    } catch (e: any) {
-      popup.alert({ title: 'Withdrawal failed', message: e?.message ?? 'Please try again.' });
-    } finally {
-      setBusy(false);
-    }
-  };
 
   // Interest is the only thing that changes a Blend position's value, so
   // earnings are exactly the on-chain balance minus the recorded principal.
-  const earned =
+  const totalEarned =
     netDeposited !== null && supplied > 0 ? Math.max(0, supplied - netDeposited) : null;
-  const perDay = supplied * apy / 365;
+
+  // The earned line follows the pinned bar (that bucket's accrual and date);
+  // unpinned it shows the total earned to date.
+  const selBar = selectedBar !== null ? bars[selectedBar] : null;
+  const earnedAmount = selBar ? selBar.earned : totalEarned;
+  const earnedDate = selBar ? formatDay(selBar.t) : formatDay(Date.now());
+
+  const [whole, cents] = formatUsd(supplied).split('.');
+  const hasPosition = supplied > 0.0000001;
 
   return (
-    <View style={[styles.safe, { paddingTop: insets.top }]}>
-      <ScrollView contentContainerStyle={styles.container}>
-        <Text style={styles.title}>Earn</Text>
+    <View style={[styles.safe, { paddingTop: insets.top + 8 }]}>
+      <ScrollView
+        style={styles.body}
+        contentContainerStyle={styles.bodyContent}
+        showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={colors.accent} />
+        }
+      >
+        <Pressable onPress={onApyInfo} style={styles.apyRow} hitSlop={6}>
+          <Ionicons name="rocket" size={16} color={colors.sub} />
+          <Text style={styles.apyText}>Earning {(apy * 100).toFixed(2)}%</Text>
+          <Ionicons name="information-circle-outline" size={16} color={colors.sub} />
+        </Pressable>
 
-        <View style={styles.card}>
-          <View style={styles.apyBadge}>
-            <Text style={styles.apyText}>{(apy * 100).toFixed(1)}% APY</Text>
-          </View>
-          <Text style={styles.cardLabel}>Earning balance</Text>
-          {loadingState ? (
-            <>
-              <Skeleton width={160} height={40} radius={10} color="rgba(0,0,0,0.08)" style={{ marginTop: 6 }} />
-              <Skeleton width={220} height={14} radius={7} color="rgba(0,0,0,0.08)" style={{ marginTop: 10 }} />
-            </>
-          ) : (
-            <>
-              <View style={styles.balanceRow}>
-                <Text style={styles.cardBalance}>{formatUsd(supplied)}</Text>
-                {earned !== null && (
-                  <Text style={styles.pnlText}>+{formatEarnings(earned)}</Text>
-                )}
-              </View>
-              {supplied > 0.0000001 && (
-                <Text style={styles.earnedRow}>
-                  At today's rate: ~{formatEarnings(perDay)}/day ({(apy * 100).toFixed(1)}% APY)
-                </Text>
-              )}
-            </>
-          )}
-        </View>
+        {loadingState ? (
+          <Skeleton width={240} height={64} radius={14} style={{ alignSelf: 'center', marginTop: 14 }} />
+        ) : (
+          <>
+            <Text style={styles.balance}>
+              {whole}
+              <Text style={styles.balanceCents}>.{cents}</Text>
+            </Text>
+            {localCurrency && localRate != null && (
+              <Text style={styles.balanceLocal}>≈ {formatLocal(supplied, localCurrency, localRate)}</Text>
+            )}
+          </>
+        )}
 
-        {chartPoints.length >= 2 ? (
-          <View style={styles.chartCard}>
-            <Text style={styles.chartTitle}>Your growth</Text>
-            <EarnChart points={chartPoints} />
+        {earnedAmount !== null ? (
+          <View style={styles.earnedRow}>
+            <View style={styles.earnedDot} />
+            <Text style={styles.earnedText}>{formatEarnings(earnedAmount)} Earned</Text>
+            <Text style={styles.earnedSub}> {earnedDate}</Text>
           </View>
         ) : (
-          supplied > 0.0000001 && (
-            <Text style={styles.chartHint}>Check back tomorrow to see your growth chart.</Text>
+          !loadingState && (
+            <Text style={styles.startHint}>{supplied <= 0 ? 'Add funds to start earning.' : ' '}</Text>
           )
         )}
 
-        <Text style={styles.sectionTitle}>Move money into Earn</Text>
-        <Text style={styles.hint}>Available: {formatUsd(balance)}</Text>
-        <TextInput
-          style={styles.input}
-          placeholder="Amount in USD"
-          placeholderTextColor={colors.sub}
-          keyboardType="decimal-pad"
-          value={amount}
-          onChangeText={setAmount}
-        />
-        <Button
-          title="Start earning"
-          onPress={onDeposit}
-          loading={busy}
-          disabled={!parseFloat(amount)}
-          style={{ marginTop: 12 }}
-        />
-        {supplied > 0.0000001 && (
-          <Button
-            title="Withdraw everything"
-            variant="secondary"
-            onPress={onWithdraw}
-            loading={busy}
-            style={{ marginTop: 10 }}
-          />
-        )}
-        <View style={styles.poweredBy}>
-          <Text style={styles.poweredByText}>Powered by</Text>
-          <Image
-            source={require('@/assets/images/blend logo.png')}
-            style={styles.poweredByLogo}
-            resizeMode="contain"
-          />
+        <View style={styles.actions}>
+          <Pressable
+            onPress={() => router.push('/earn-withdraw' as any)}
+            disabled={!hasPosition}
+            style={({ pressed }) => [
+              styles.pill,
+              styles.pillSecondary,
+              !hasPosition && styles.pillDisabled,
+              pressed && { opacity: 0.85 },
+            ]}
+          >
+            <Text style={[styles.pillText, styles.pillSecondaryText]}>Withdraw</Text>
+          </Pressable>
+          <Pressable
+            onPress={() => router.push('/earn-add' as any)}
+            style={({ pressed }) => [styles.pill, pressed && { opacity: 0.85 }]}
+          >
+            <Text style={styles.pillText}>Add Funds</Text>
+          </Pressable>
+        </View>
+
+        <View style={styles.chartWrap}>
+          {loadingState ? (
+            <ChartSkeleton />
+          ) : (
+            <SavingsChart bars={bars} selected={selectedBar} onSelect={setSelectedBar} />
+          )}
+        </View>
+
+        <View style={styles.rangeRow}>
+          {RANGES.map((r) => (
+            <Pressable
+              key={r}
+              onPress={() => onPickRange(r)}
+              style={[styles.rangeBtn, range === r && styles.rangeBtnActive]}
+            >
+              <Text style={[styles.rangeText, range === r && styles.rangeTextActive]}>{r}</Text>
+            </Pressable>
+          ))}
+          <Pressable onPress={() => router.push('/simulate' as any)} style={styles.rangeBtn}>
+            <Text style={styles.rangeText}>
+              Future<Text style={styles.futureStar}>+</Text>
+            </Text>
+          </Pressable>
         </View>
       </ScrollView>
     </View>
@@ -231,53 +287,82 @@ export default function Earn() {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.bg },
-  container: { padding: 20, paddingBottom: 40 },
-  title: { fontSize: 28, fontWeight: '800', color: colors.ink, marginBottom: 12 },
-  card: { backgroundColor: colors.goldSoft, borderRadius: radius.lg, padding: 24, minHeight: 150 },
-  apyBadge: {
-    alignSelf: 'flex-start',
-    backgroundColor: colors.gold,
-    borderRadius: radius.full,
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    marginBottom: 14,
-  },
-  apyText: { color: '#fff', fontWeight: '800', fontSize: 13 },
-  cardLabel: { color: colors.sub, fontSize: 14, fontWeight: '600' },
-  balanceRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 4 },
-  cardBalance: { color: colors.ink, fontSize: 38, fontWeight: '800' },
-  pnlText: { color: colors.accentDark, fontSize: 15, fontWeight: '800' },
-  earnedRow: { color: colors.sub, fontSize: 14, fontWeight: '600', marginTop: 6 },
-  chartCard: {
-    backgroundColor: colors.card,
-    borderRadius: radius.lg,
-    borderWidth: 1,
-    borderColor: colors.border,
-    padding: 20,
-    marginTop: 16,
-  },
-  chartTitle: { fontSize: 15, fontWeight: '700', color: colors.ink, marginBottom: 4 },
-  chartHint: { color: colors.sub, fontSize: 13, marginTop: 16, textAlign: 'center' },
-  sectionTitle: { fontSize: 18, fontWeight: '700', color: colors.ink, marginTop: 28 },
-  hint: { color: colors.sub, fontSize: 14, marginTop: 4, marginBottom: 10 },
-  input: {
-    height: 56,
-    borderRadius: radius.md,
-    backgroundColor: colors.card,
-    borderWidth: 1,
-    borderColor: colors.border,
-    paddingHorizontal: 18,
-    fontSize: 17,
-    color: colors.ink,
-  },
-  poweredBy: {
+  body: { flex: 1 },
+  bodyContent: { flexGrow: 1, paddingHorizontal: 24 },
+
+  apyRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 1,
-    marginTop: 28,
+    gap: 6,
+    marginTop: 20,
   },
-  poweredByText: { color: colors.sub, fontSize: 13, fontWeight: '600' },
-  // The wordmark is ~3.5:1; keep it modest so it reads as a credit line.
-  poweredByLogo: { width: 70, height: 20 },
+  apyText: { fontSize: 17, fontWeight: '600', color: colors.sub },
+
+  balance: {
+    fontSize: 64,
+    fontWeight: '800',
+    color: colors.ink,
+    textAlign: 'center',
+    marginTop: 10,
+    letterSpacing: -1.5,
+  },
+  balanceCents: { fontSize: 40 },
+  balanceLocal: { color: colors.sub, fontSize: 16, fontWeight: '600', textAlign: 'center', marginTop: 2 },
+
+  earnedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 7,
+    marginTop: 10,
+  },
+  earnedDot: { width: 9, height: 9, borderRadius: 4.5, backgroundColor: colors.accentSoft },
+  earnedText: { fontSize: 17, fontWeight: '800', color: colors.accent },
+  earnedSub: { fontSize: 17, fontWeight: '500', color: colors.sub },
+  startHint: { textAlign: 'center', color: colors.sub, fontSize: 16, marginTop: 10 },
+
+  chartWrap: { flex: 1, justifyContent: 'center', marginTop: 12, paddingBottom: 24 },
+  chartSkeleton: { height: 300, flexDirection: 'row', alignItems: 'flex-end', gap: 14, paddingHorizontal: 4 },
+  chartSkeletonSlot: { flex: 1 },
+
+  rangeRow: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 4,
+    marginBottom: 24,
+    // Lift the pills up visually WITHOUT feeding the flex layout (the chart is
+    // flex:1, so a negative margin here would grow its space and push the
+    // centered chart down instead). translateY moves only the pills.
+    transform: [{ translateY: -28 }],
+  },
+  rangeBtn: {
+    paddingHorizontal: 15,
+    paddingVertical: 9,
+    borderRadius: radius.full,
+  },
+  rangeBtnActive: { backgroundColor: colors.card },
+  rangeText: { fontSize: 15, fontWeight: '700', color: colors.sub },
+  rangeTextActive: { color: colors.ink },
+  futureStar: { fontSize: 11, color: colors.sub },
+
+  actions: {
+    flexDirection: 'row',
+    gap: 14,
+    marginTop: 36,
+  },
+  pill: {
+    flex: 1,
+    height: 58,
+    borderRadius: radius.full,
+    backgroundColor: colors.accent,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pillSecondary: { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border },
+  pillDisabled: { opacity: 0.5 },
+  pillText: { color: '#fff', fontSize: 18, fontWeight: '700' },
+  pillSecondaryText: { color: colors.ink },
 });

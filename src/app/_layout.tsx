@@ -58,6 +58,7 @@ export default function RootLayout() {
           }}
         >
           <Stack.Screen name="index" options={{ animation: 'fade' }} />
+          <Stack.Screen name="invite" options={{ animation: 'fade' }} />
           <Stack.Screen name="onboarding" options={{ animation: 'fade' }} />
           <Stack.Screen name="recover" />
           <Stack.Screen name="(tabs)" options={{ animation: 'fade' }} />
@@ -65,7 +66,11 @@ export default function RootLayout() {
           <Stack.Screen name="request" options={MODAL} />
           <Stack.Screen name="scan" options={MODAL} />
           <Stack.Screen name="add-cash" options={MODAL} />
+          <Stack.Screen name="cash-in-wallet" />
           <Stack.Screen name="cash-out" options={MODAL} />
+          <Stack.Screen name="earn-add" options={MODAL} />
+          <Stack.Screen name="earn-withdraw" options={MODAL} />
+          <Stack.Screen name="simulate" />
           <Stack.Screen name="edit-profile" options={MODAL} />
           <Stack.Screen name="verify-email" options={MODAL} />
           <Stack.Screen name="notifications" />

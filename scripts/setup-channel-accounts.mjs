@@ -20,7 +20,7 @@ import { readFileSync } from 'node:fs';
 const cfg = readFileSync(new URL('../src/lib/stellar-config.ts', import.meta.url), 'utf8');
 const pick = (name) => cfg.match(new RegExp(`${name} = '([^']+)'`))[1];
 const HORIZON_URL = pick('HORIZON_URL');
-const TREASURY_SECRET = pick('TREASURY_SECRET');
+const { TREASURY_SECRET } = await import('./treasury-secret.mjs');
 
 const env = readFileSync(new URL('../.env', import.meta.url), 'utf8');
 const pickEnv = (name) => env.match(new RegExp(`${name}=(.*)`))?.[1]?.trim();

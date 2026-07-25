@@ -1,8 +1,9 @@
 import { Ionicons } from '@expo/vector-icons';
+import { Image } from 'expo-image';
 import * as Haptics from 'expo-haptics';
 import * as LocalAuthentication from 'expo-local-authentication';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Image, Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { FullWindowOverlay } from 'react-native-screens';
 import * as SecureStore from 'expo-secure-store';
 import { syncRecoveryPin } from '@/lib/auth';
@@ -10,7 +11,7 @@ import * as pin from '@/lib/pin';
 import { colors, radius } from '@/lib/theme';
 import { PUBLIC_KEY } from '@/lib/wallet-context';
 
-// Remitt's own lock UI: a full-screen branded passcode pad. Face ID /
+// Pocket's own lock UI: a full-screen branded passcode pad. Face ID /
 // fingerprint fires as a small system overlay ON TOP of this screen (the
 // sheet itself can't be reskinned — the OS draws it so users can trust it),
 // and our PIN pad is the fallback beneath it, replacing the OS device-passcode
@@ -146,7 +147,7 @@ export function LockProvider({ children }: { children: React.ReactNode }) {
       const bioAllowed = available && active.mode === 'unlock' && !active.disableBiometrics;
       setBioAvailable(bioAllowed);
       if (bioAllowed) {
-        const ok = await tryBiometrics(active.reason ?? 'Unlock Remitt');
+        const ok = await tryBiometrics(active.reason ?? 'Unlock Pocket');
         if (!cancelled && ok) finish(true);
       }
       // Surface an existing cooldown (e.g. app reopened mid-lockout).
@@ -230,7 +231,7 @@ export function LockProvider({ children }: { children: React.ReactNode }) {
     if (!active || lockedSec > 0) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
     if (key === 'bio') {
-      tryBiometrics(active.reason ?? 'Unlock Remitt').then((ok) => ok && finish(true));
+      tryBiometrics(active.reason ?? 'Unlock Pocket').then((ok) => ok && finish(true));
       return;
     }
     if (key === 'del') {
@@ -257,15 +258,16 @@ export function LockProvider({ children }: { children: React.ReactNode }) {
   const subtitle =
     active?.mode === 'create'
       ? 'Protects your money on this phone.'
-      : active?.reason ?? 'Unlock Remitt';
+      : active?.reason ?? 'Unlock Pocket';
 
   const screen = active && (
     <View style={styles.screen}>
       <View style={styles.top}>
         <Image
-          source={require('../../assets/images/splash-icon.png')}
+          source={require('../../assets/pocket brand kit transparent/pocket_hor_blk.png')}
           style={styles.logo}
-          resizeMode="contain"
+          contentFit="contain"
+          cachePolicy="memory"
         />
         <Text style={styles.title}>{title}</Text>
         <Text style={styles.subtitle}>{subtitle}</Text>
@@ -342,7 +344,7 @@ const styles = StyleSheet.create({
   screen: { flex: 1, backgroundColor: colors.bg, paddingHorizontal: 28, paddingBottom: 24 },
   // Everything above the pad — logo, title, dots — sits vertically centered.
   top: { alignItems: 'center', justifyContent: 'center', flex: 1 },
-  logo: { width: 96, height: 82 },
+  logo: { width: 220, height: 64 },
   title: { fontSize: 24, fontWeight: '800', color: colors.ink, marginTop: 24 },
   subtitle: { fontSize: 15, color: colors.sub, marginTop: 8, textAlign: 'center' },
   dots: { flexDirection: 'row', gap: 18, marginTop: 32 },

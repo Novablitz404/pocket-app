@@ -18,12 +18,11 @@ import EventSource from 'react-native-sse';
 import { Account, Asset, BASE_FEE, Horizon, Keypair, Memo, Networks, Operation, TransactionBuilder } from '@stellar/stellar-sdk';
 import { POOL_ID as BLEND_POOL_ID } from './earn-blend.ts';
 import { ANON_KEY, SUPABASE_URL } from './directory.ts';
-import { HORIZON_URL, TREASURY_PUBLIC, TREASURY_SECRET, USDC_CODE, USDC_ISSUER } from './stellar-config.ts';
+import { HORIZON_URL, TREASURY_PUBLIC, USDC_CODE, USDC_ISSUER } from './stellar-config.ts';
 
 const server = new Horizon.Server(HORIZON_URL);
 const NETWORK = Networks.TESTNET;
 const USDC = new Asset(USDC_CODE, USDC_ISSUER);
-const treasuryKp = () => Keypair.fromSecret(TREASURY_SECRET);
 
 // 2-of-3 signer set: three weight-1 signers — the user's master key plus
 // Remitt's KMS-held signer and the compliance signer — with all thresholds at
@@ -100,7 +99,7 @@ async function feeBumpAndSubmit(inner: { toEnvelope(): { toXDR(): Uint8Array } }
 
 /**
  * Generates a wallet locally. No network call, no XLM — nothing touches the
- * chain until the user first funds the account (see cashIn). Instant.
+ * chain until the account is activated (see activateAccount). Instant.
  */
 export function createWallet(): { publicKey: string; secret: string } {
   const kp = Keypair.random();
@@ -211,37 +210,14 @@ export async function activateAccount(userSecret: string) {
   if (!res.ok) throw new Error(data?.error ?? 'Account activation failed');
 }
 
-/** Plain treasury → user USDC payment (treasury has XLM, pays its own fee). */
-async function treasuryPayment(to: string, amount: number) {
-  const treasury = treasuryKp();
-  const source = await server.loadAccount(treasury.publicKey());
-  const tx = new TransactionBuilder(source, { fee: BASE_FEE, networkPassphrase: NETWORK })
-    .addOperation(Operation.payment({ destination: to, asset: USDC, amount: amount.toFixed(7) }))
-    .setTimeout(60)
-    .build();
-  tx.sign(treasury);
-  await submit(tx);
-}
-
-/**
- * Cash in: settles USD onto the user's account. First deposit activates the
- * account (sponsored, server-signed — see activateAccount); later deposits
- * are plain treasury payments.
- *
- * The payment below is a TESTNET-ONLY stand-in for a real on-ramp partner
- * (no partner integration exists yet — see [[owlpay-b-hybrid-decision]] for
- * the remittance-protocol side's plan). On mainnet, once a partner is wired
- * up, it delivers USDC directly to the user's wallet after activation and
- * this treasuryPayment call goes away entirely.
- */
-export async function cashIn(userPublicKey: string, userSecret: string, amount: number) {
-  if (await accountExists(userPublicKey)) {
-    await treasuryPayment(userPublicKey, amount);
-    return;
-  }
-  await activateAccount(userSecret);
-  await treasuryPayment(userPublicKey, amount);
-}
+// Cash-in delivery is NO LONGER a client call. It used to be a treasury→user
+// USDC payment signed with TREASURY_SECRET right here — the client-side stand-in
+// that put the treasury key in the app bundle. Delivery now happens server-side:
+// the user opens a cash-in INTENT (see src/lib/onramp.ts → create-intent), pays
+// pesos, and once the deposit is detected the gated deliver-cash-in Edge Function
+// pays the USDC. Activation (activateAccount above) still runs client-side
+// because it needs the user's device key; delivery does not. This is the mainnet
+// shape — the treasury key stays server-side. See onramp-build-plan (O1/O2).
 
 /**
  * A user-signed USDC payment, fee-bumped by the treasury so the user's

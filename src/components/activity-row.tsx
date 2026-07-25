@@ -12,8 +12,8 @@ export const ACTIVITY_META: Record<
 > = {
   sent: { label: 'Sent', icon: 'arrow-up', sign: -1 },
   received: { label: 'Received', icon: 'arrow-down', sign: 1 },
-  'cash-in': { label: 'Added cash', icon: 'add', sign: 1 },
-  'cash-out': { label: 'Cashed out', icon: 'business', sign: -1 },
+  'cash-in': { label: 'Deposited', icon: 'add', sign: 1 },
+  'cash-out': { label: 'Transferred', icon: 'business', sign: -1 },
   'earn-deposit': { label: 'Moved to Earn', icon: 'trending-up', sign: -1 },
   'earn-withdraw': { label: 'Withdrew from Earn', icon: 'trending-down', sign: 1 },
 };

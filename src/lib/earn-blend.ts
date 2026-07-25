@@ -23,7 +23,6 @@ import {
   Asset,
   Contract,
   Keypair,
-  Networks,
   TransactionBuilder,
   nativeToScVal,
   rpc,
@@ -31,11 +30,19 @@ import {
   xdr,
 } from '@stellar/stellar-sdk';
 import { ANON_KEY, SUPABASE_URL } from './directory.ts';
-import { HORIZON_URL, USDC_CODE, USDC_ISSUER } from './stellar-config.ts';
+import { BLEND_POOL_ID, HORIZON_URL, NETWORK_PASSPHRASE, USDC_CODE, USDC_ISSUER } from './stellar-config.ts';
 
-const SOROBAN_RPC = 'https://soroban-testnet.stellar.org';
-export const POOL_ID = 'CAPBMXIQTICKWFPWFDJWMAKBXBPJZUKLNONQH3MLPLLBKQ643CYN5PRW';
-const PASSPHRASE = Networks.TESTNET;
+// Two RPC URLs (not one) so testnet keeps working while a mainnet build
+// exists side by side. Which one applies follows NETWORK_PASSPHRASE — i.e.
+// whichever network stellar-config.ts was last generated for (see
+// scripts/switch-network.mjs) — rather than a second, separately-set env
+// flag that could drift out of sync with it.
+const IS_MAINNET = (NETWORK_PASSPHRASE as string) === 'Public Global Stellar Network ; September 2015';
+const SOROBAN_RPC =
+  (IS_MAINNET ? process.env.EXPO_PUBLIC_SOROBAN_RPC_URL_MAINNET : process.env.EXPO_PUBLIC_SOROBAN_RPC_URL_TESTNET) ??
+  (IS_MAINNET ? 'https://soroban-rpc.stellar.org' : 'https://soroban-testnet.stellar.org');
+export const POOL_ID = BLEND_POOL_ID;
+const PASSPHRASE = NETWORK_PASSPHRASE;
 
 const USDC_SAC = new Asset(USDC_CODE, USDC_ISSUER).contractId(PASSPHRASE);
 
@@ -78,7 +85,7 @@ const b64 = (x: { toXDR(): Buffer | Uint8Array }) => Buffer.from(x.toXDR()).toSt
 async function loadSourceAccount(accountPublicKey: string): Promise<Account> {
   const res = await fetch(`${HORIZON_URL}/accounts/${accountPublicKey}`);
   if (res.status === 404) {
-    throw new Error('Your account has no deposits yet — add cash before using Earn.');
+    throw new Error('Your account has no deposits yet — deposit before using Earn.');
   }
   if (!res.ok) throw new Error(`Could not load your account (Horizon ${res.status}).`);
   const json = await res.json();
@@ -230,21 +237,42 @@ export async function getSupplied(userPublicKey: string): Promise<number> {
   return suppliedFromSnapshot(await loadPoolSnapshot(userPublicKey));
 }
 
-/** The pool's live supply APY, with no user position involved — for the
- *  pool-rate history job (scripts/record-pool-rate.mjs), which logs one
- *  global time series rather than have every user's device read (and then
- *  redundantly re-log) the same pool-wide number. */
+/** The pool's live supply APY, with no user position involved — reads the
+ *  Soroban RPC directly. Only used by the record-pool-rate scripts that
+ *  write blend_pool_rates; app UI should use getCachedPoolApy instead so
+ *  every device isn't independently hitting RPC for the same pool-wide
+ *  number. */
 export async function getPoolApy(): Promise<number | null> {
   return computeSupplyApy(await loadReserveState());
 }
 
-/** Live supply APY + supplied balance for the Earn screen. */
+/** The pool's current supply APY from the shared snapshot (written every
+ *  15 min by the record-pool-rate Edge Function/cron) — a cheap Supabase
+ *  read instead of every device hitting Soroban RPC for the same pool-wide
+ *  number. Null if unavailable (no row yet, network hiccup). */
+export async function getCachedPoolApy(): Promise<number | null> {
+  try {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/blend_pool_rates?select=apy&limit=1`, {
+      headers: { apikey: ANON_KEY, Authorization: `Bearer ${ANON_KEY}` },
+    });
+    if (!res.ok) return null;
+    const rows: { apy: number | string }[] = await res.json();
+    const apy = rows[0]?.apy;
+    return apy != null ? Number(apy) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Supply APY (from the shared snapshot, falling back to the live reserve
+ *  state already fetched for this user's balance) + supplied balance, for
+ *  the Earn screen. */
 export async function getEarnState(
   userPublicKey: string,
 ): Promise<{ apy: number; supplied: number }> {
-  const snapshot = await loadPoolSnapshot(userPublicKey);
+  const [cachedApy, snapshot] = await Promise.all([getCachedPoolApy(), loadPoolSnapshot(userPublicKey)]);
   return {
-    apy: computeSupplyApy(snapshot) ?? FALLBACK_APY,
+    apy: cachedApy ?? computeSupplyApy(snapshot) ?? FALLBACK_APY,
     supplied: suppliedFromSnapshot(snapshot),
   };
 }
@@ -270,7 +298,32 @@ async function feeBumpAndSend(inner: any): Promise<{ hash: string; status: strin
   return data;
 }
 
+/**
+ * Sim→execution footprint race (seen live on a partial withdraw right after a
+ * deposit): Blend skips its EmisData write when no ledger time has passed
+ * since the pool's last interaction, so a simulation run in that same ledger
+ * yields a footprint WITHOUT the EmisData key — then the tx executes a ledger
+ * later, where the write IS needed, and traps with "access contract data key
+ * outside of the footprint". A single retry with a fresh simulation (next
+ * ledger) produces the full footprint and succeeds.
+ */
 async function submitRequest(
+  accountPublicKey: string,
+  signingSecret: string,
+  requestType: number,
+  amount: number,
+) {
+  try {
+    return await submitRequestOnce(accountPublicKey, signingSecret, requestType, amount);
+  } catch (e: any) {
+    if (!String(e?.message ?? '').startsWith('Blend transaction failed')) throw e;
+    // Wait out the current ledger (~5s) so the retry simulates fresh state.
+    await new Promise((r) => setTimeout(r, 7000));
+    return await submitRequestOnce(accountPublicKey, signingSecret, requestType, amount);
+  }
+}
+
+async function submitRequestOnce(
   accountPublicKey: string,
   signingSecret: string,
   requestType: number,
@@ -326,6 +379,21 @@ async function submitRequest(
 /** Move USDC from the user's wallet into the Blend pool to start earning. */
 export async function deposit(accountPublicKey: string, signingSecret: string, amount: number) {
   await submitRequest(accountPublicKey, signingSecret, REQUEST_SUPPLY, amount);
+}
+
+/**
+ * Withdraw part of the savings balance back to the user's wallet. The caller
+ * is responsible for keeping `amount` at or below the current position —
+ * Blend clamps over-requests, but then the returned figures would overstate
+ * what actually moved.
+ */
+export async function withdraw(
+  accountPublicKey: string,
+  signingSecret: string,
+  amount: number,
+): Promise<{ withdrawn: number; fee: number }> {
+  await submitRequest(accountPublicKey, signingSecret, REQUEST_WITHDRAW, amount);
+  return { withdrawn: amount, fee: amount * WITHDRAW_FEE_RATE };
 }
 
 /**

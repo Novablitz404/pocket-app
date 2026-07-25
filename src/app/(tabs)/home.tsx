@@ -5,7 +5,9 @@ import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, View } from 'r
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ActivityRow } from '@/components/activity-row';
 import { Avatar } from '@/components/avatar';
+import { MethodSheet } from '@/components/method-sheet';
 import { Skeleton } from '@/components/skeleton';
+import { formatLocal } from '@/lib/fx';
 import { getNotifications } from '@/lib/notifications';
 import { colors, formatUsd, radius } from '@/lib/theme';
 import { useWallet } from '@/lib/wallet-context';
@@ -13,15 +15,16 @@ import { useWallet } from '@/lib/wallet-context';
 const ACTIONS: { label: string; icon: keyof typeof Ionicons.glyphMap; href: string }[] = [
   { label: 'Send', icon: 'arrow-up', href: '/send' },
   { label: 'Request', icon: 'arrow-down', href: '/request' },
-  { label: 'Add cash', icon: 'add', href: '/add-cash' },
-  { label: 'Cash out', icon: 'cash-outline', href: '/cash-out' },
+  { label: 'Deposit', icon: 'add', href: '/add-cash' },
+  { label: 'Transfer', icon: 'cash-outline', href: '/cash-out' },
 ];
 
 export default function Home() {
-  const { name, avatarUrl, accountVerified, balance, activity, balanceLoaded, publicKey, refresh } = useWallet();
+  const { name, avatarUrl, accountVerified, balance, activity, balanceLoaded, publicKey, localCurrency, localRate, refresh } = useWallet();
   const insets = useSafeAreaInsets();
   const [refreshing, setRefreshing] = useState(false);
   const [hasUnread, setHasUnread] = useState(false);
+  const [methodSheet, setMethodSheet] = useState<'deposit' | 'transfer' | null>(null);
 
   const loadUnread = useCallback(async () => {
     if (!publicKey) return;
@@ -72,11 +75,15 @@ export default function Home() {
         <View style={styles.balanceCard}>
           <Text style={styles.balanceLabel}>Account balance</Text>
           {balanceLoaded ? (
-            <Text style={styles.balance}>{formatUsd(balance)}</Text>
+            <>
+              <Text style={styles.balance}>{formatUsd(balance)}</Text>
+              {localCurrency && localRate != null && (
+                <Text style={styles.balanceLocal}>≈ {formatLocal(balance, localCurrency, localRate)}</Text>
+              )}
+            </>
           ) : (
             <Skeleton width={180} height={44} radius={10} style={{ marginTop: 8, marginBottom: 2 }} />
           )}
-          <Text style={styles.balanceSub}>Tracks the US dollar, dollar-for-dollar · available instantly</Text>
         </View>
 
         <View style={styles.actions}>
@@ -84,7 +91,11 @@ export default function Home() {
             <Pressable
               key={action.label}
               style={({ pressed }) => [styles.action, pressed && { opacity: 0.7 }]}
-              onPress={() => router.push(action.href as any)}
+              onPress={() => {
+                if (action.label === 'Deposit') setMethodSheet('deposit');
+                else if (action.label === 'Transfer') setMethodSheet('transfer');
+                else router.push(action.href as any);
+              }}
             >
               <View style={styles.actionIcon}>
                 <Ionicons name={action.icon} size={22} color={colors.accentDark} />
@@ -101,11 +112,30 @@ export default function Home() {
           </Link>
         </View>
         {activity.length === 0 ? (
-          <Text style={styles.empty}>No activity yet. Add cash to get started.</Text>
+          <Text style={styles.empty}>No activity yet. Deposit to get started.</Text>
         ) : (
           activity.slice(0, 5).map((item) => <ActivityRow key={item.id} item={item} />)
         )}
       </ScrollView>
+
+      <MethodSheet
+        visible={methodSheet != null}
+        onClose={() => setMethodSheet(null)}
+        title={methodSheet === 'transfer' ? 'Transfer with' : 'Deposit with'}
+        bankSubtitle={
+          methodSheet === 'transfer' ? 'Withdraw to GCash or bank via InstaPay' : 'GCash, bank transfer via InstaPay'
+        }
+        debitSubtitle={
+          methodSheet === 'transfer' ? 'Instant payout to Visa or Mastercard' : 'Instant, via Visa or Mastercard'
+        }
+        externalSubtitle={
+          methodSheet === 'transfer' ? 'Send USDC to another wallet' : 'Send USDC from another wallet'
+        }
+        onSelectExternalWallet={() => {
+          setMethodSheet(null);
+          router.push(methodSheet === 'transfer' ? '/send' : '/cash-in-wallet');
+        }}
+      />
     </View>
   );
 }
@@ -142,7 +172,7 @@ const styles = StyleSheet.create({
   },
   balanceLabel: { color: '#9DB1A6', fontSize: 14, fontWeight: '600' },
   balance: { color: '#fff', fontSize: 44, fontWeight: '800', marginTop: 6 },
-  balanceSub: { color: '#9DB1A6', fontSize: 13, marginTop: 6 },
+  balanceLocal: { color: '#9DB1A6', fontSize: 16, fontWeight: '600', marginTop: 2 },
   actions: { flexDirection: 'row', marginTop: 20, gap: 10 },
   action: { flex: 1, alignItems: 'center', gap: 8 },
   actionIcon: {

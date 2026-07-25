@@ -16,8 +16,8 @@
 //
 // Deploy: npx supabase functions deploy reserve-channel
 import { Horizon } from 'npm:@stellar/stellar-sdk@^16';
+import { HORIZON_URL } from '../_shared/network-config.ts';
 
-const HORIZON_URL = 'https://horizon-testnet.stellar.org';
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
 

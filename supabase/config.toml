@@ -2,3 +2,9 @@
 # This repo only uses the CLI for Edge Functions (record-pool-rate) — there's
 # no local Supabase stack (db, auth, etc.) being run from here.
 project_id = "ggapuomnnocuumwrgfnt"
+
+# Resend's webhook can't send a Supabase JWT, so this function must skip the
+# platform's default auth gate. It verifies the request is really from Resend
+# itself instead (Svix signature check inside the function).
+[functions.inbound-email]
+verify_jwt = false

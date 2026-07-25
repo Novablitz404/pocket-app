@@ -67,6 +67,19 @@ export async function recordDeposit(address: string, amount: number): Promise<vo
   }
 }
 
+/** Reduce the net principal after a partial withdrawal. Clamped at zero:
+ *  withdrawing accrued interest shouldn't drive the recorded principal
+ *  negative (earned = supplied - net would then overstate earnings). */
+export async function recordWithdrawal(address: string, amount: number): Promise<void> {
+  if (!earnLedgerEnabled) return;
+  try {
+    const current = (await getNetDeposited(address)) ?? 0;
+    await setNetDeposited(address, Math.max(0, current - amount));
+  } catch {
+    // Best-effort, same as above.
+  }
+}
+
 /** Zero the net principal after a full withdrawal (withdrawAll empties the
  *  on-chain position). */
 export async function resetDeposits(address: string): Promise<void> {
@@ -87,6 +100,27 @@ export interface EarnSnapshot {
   netDeposited: number;
   earned: number;
   createdAt: string;
+}
+
+/** Record a chart point RIGHT NOW, bypassing the focus-time cooldown. For
+ *  actual money movement (deposit / withdraw), which should appear on the
+ *  chart live instead of waiting out the throttle. Unlike maybeRecordSnapshot
+ *  this also records supplied = 0, so a full withdrawal draws its drop. */
+export async function recordSnapshotNow(
+  address: string,
+  supplied: number,
+  netDeposited: number,
+): Promise<void> {
+  if (!earnLedgerEnabled) return;
+  try {
+    await fetch(rest(SNAPSHOT_TABLE), {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ address, supplied, net_deposited: netDeposited }),
+    });
+  } catch {
+    // Best-effort: the chart just has one less point.
+  }
 }
 
 /** Record a (supplied, net_deposited) point for the growth chart, but only if

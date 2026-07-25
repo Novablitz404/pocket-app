@@ -27,18 +27,18 @@ export default function CashOut() {
   const partnerLabel = PARTNERS.find((p) => p.id === partner)?.label;
 
   const onCashOut = async () => {
-    if (!(await ensureUnlocked(`Cash out ${formatUsd(value)}`))) return;
+    if (!(await ensureUnlocked(`Transfer ${formatUsd(value)}`))) return;
     setBusy(true);
     try {
       await cashOut(value);
       await popup.alert({
-        title: 'Cash out started',
+        title: 'Transfer started',
         message: `${formatUsd(value)} is on its way to ${partnerLabel}.`,
         confirmText: 'Done',
       });
       router.back();
     } catch (e: any) {
-      popup.alert({ title: 'Could not cash out', message: e?.message ?? 'Please try again.' });
+      popup.alert({ title: 'Could not transfer', message: e?.message ?? 'Please try again.' });
     } finally {
       setBusy(false);
     }
@@ -47,7 +47,7 @@ export default function CashOut() {
   return (
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       <View style={styles.header}>
-        <Text style={styles.title}>Cash out</Text>
+        <Text style={styles.title}>Transfer</Text>
         <Pressable onPress={() => router.back()} hitSlop={12}>
           <Ionicons name="close" size={26} color={colors.ink} />
         </Pressable>
@@ -83,7 +83,7 @@ export default function CashOut() {
 
         <AmountPad value={amount} onChange={setAmount} />
         <Button
-          title={value > 0 ? `Cash out ${formatUsd(value)}` : 'Cash out'}
+          title={value > 0 ? `Transfer ${formatUsd(value)}` : 'Transfer'}
           onPress={onCashOut}
           disabled={value <= 0 || value > balance}
           loading={busy}

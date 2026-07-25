@@ -37,12 +37,9 @@
 //   channel_accounts table + claim/release RPCs from supabase-schema.sql,
 //   and a pool seeded via scripts/setup-channel-accounts.mjs)
 import { Buffer } from 'node:buffer';
-import { Keypair, Networks, TransactionBuilder, Transaction } from 'npm:@stellar/stellar-sdk@^16';
-
-const HORIZON_URL = 'https://horizon-testnet.stellar.org';
-const NETWORK_PASSPHRASE = Networks.TESTNET;
-const USDC_CODE = 'USDC';
-const USDC_ISSUER = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
+import { Keypair, TransactionBuilder, Transaction } from 'npm:@stellar/stellar-sdk@^16';
+import { feeBumpEnvelope } from '../_shared/feebump.ts';
+import { HORIZON_URL, NETWORK_PASSPHRASE, USDC_CODE, USDC_ISSUER } from '../_shared/network-config.ts';
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
@@ -199,7 +196,9 @@ Deno.serve(async (req) => {
     const newAccount = assertIsActivation(inner, channelPublicKey);
     const channelSecret = await loadReservedChannelSecret(channelPublicKey);
     inner.sign(Keypair.fromSecret(channelSecret), treasury);
-    const result = await submitClassic(b64(inner.toEnvelope()));
+    // Treasury fee-bumps: the channel supplies only the sequence number and
+    // pays no fee (pure sequence provider — see _shared/feebump.ts).
+    const result = await submitClassic(feeBumpEnvelope(inner, treasury, NETWORK_PASSPHRASE));
     return new Response(JSON.stringify({ ...result, account: newAccount }), { status: 200 });
   } catch (e) {
     return new Response(JSON.stringify({ error: String(e) }), { status: 400 });

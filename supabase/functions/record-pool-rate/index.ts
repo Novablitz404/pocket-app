@@ -1,11 +1,16 @@
-// Supabase Edge Function: the single writer of the Blend pool's supply-APY
-// history (blend_pool_rates). Meant to run on a schedule (see the pg_cron +
-// pg_net block at the bottom of ../../../scripts/supabase-schema.sql), not to
-// be called by the app — the pool's rate is identical for every Earn user,
-// so one scheduled reader beats every client independently hitting the
-// Soroban RPC and writing a near-duplicate row (see earn-blend.ts's
-// getPoolApy, which this mirrors — no Hermes workarounds needed here since
-// Edge Functions run on Deno, not React Native).
+// Supabase Edge Function: the single writer of the Blend pool's current
+// supply APY (blend_pool_rates). Meant to run on a schedule (see the pg_cron
+// + pg_net block at the bottom of ../../../scripts/supabase-schema.sql), not
+// to be called by the app — the pool's rate is identical for every Earn
+// user, so one scheduled reader beats every client independently hitting the
+// Soroban RPC for the same number (see earn-blend.ts's getCachedPoolApy,
+// which reads this table, and getPoolApy, which this mirrors — no Hermes
+// workarounds needed here since Edge Functions run on Deno, not React
+// Native).
+//
+// Only the latest rate is ever read (getCachedPoolApy), so this always
+// upserts the same fixed row id instead of inserting a new row every run —
+// otherwise the table grows forever for a number nothing reads historically.
 //
 // Deploy (from packages/app):
 //   npx supabase login
@@ -15,18 +20,20 @@
 // Manual test after deploy:
 //   curl -X POST https://ggapuomnnocuumwrgfnt.supabase.co/functions/v1/record-pool-rate \
 //     -H "Authorization: Bearer <anon-or-service-role-key>"
-import { Address, Networks, Asset, xdr, scValToNative } from 'npm:@stellar/stellar-sdk@^16';
+import { Address, Asset, xdr, scValToNative } from 'npm:@stellar/stellar-sdk@^16';
+import { BLEND_POOL_ID, NETWORK_PASSPHRASE, USDC_ISSUER, SOROBAN_RPC } from '../_shared/network-config.ts';
 
-const SOROBAN_RPC = 'https://soroban-testnet.stellar.org';
-const POOL_ID = 'CAPBMXIQTICKWFPWFDJWMAKBXBPJZUKLNONQH3MLPLLBKQ643CYN5PRW';
-const USDC_ISSUER = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
-const USDC_SAC = new Asset('USDC', USDC_ISSUER).contractId(Networks.TESTNET);
+const POOL_ID = BLEND_POOL_ID;
+const USDC_SAC = new Asset('USDC', USDC_ISSUER).contractId(NETWORK_PASSPHRASE);
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
 // Service role, not anon — this write should not depend on the demo-grade
 // anon insert policy on blend_pool_rates; Edge Functions get this injected
 // automatically, it's never shipped to the client.
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!;
+
+// Fixed so every run updates the same row instead of inserting a new one.
+const SINGLETON_ID = '00000000-0000-0000-0000-000000000001';
 
 function b64(x: { toXDR(): Buffer | Uint8Array }): string {
   return btoa(String.fromCharCode(...new Uint8Array(x.toXDR())));
@@ -123,18 +130,34 @@ Deno.serve(async () => {
     if (apy === null) {
       return new Response(JSON.stringify({ error: 'reserve state unavailable' }), { status: 502 });
     }
-    const insert = await fetch(`${SUPABASE_URL}/rest/v1/blend_pool_rates`, {
+    const upsert = await fetch(`${SUPABASE_URL}/rest/v1/blend_pool_rates?on_conflict=id`, {
       method: 'POST',
       headers: {
         apikey: SERVICE_ROLE_KEY,
         Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
         'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates,return=minimal',
       },
-      body: JSON.stringify({ apy }),
+      body: JSON.stringify({ id: SINGLETON_ID, apy, created_at: new Date().toISOString() }),
     });
-    if (!insert.ok) {
-      return new Response(JSON.stringify({ error: `insert failed: ${await insert.text()}` }), { status: 502 });
+    if (!upsert.ok) {
+      return new Response(JSON.stringify({ error: `upsert failed: ${await upsert.text()}` }), { status: 502 });
     }
+
+    // Self-heal: drop any stray rows from before this went singleton (or any
+    // that somehow slip in), so exactly one row ever exists.
+    const cleanup = await fetch(`${SUPABASE_URL}/rest/v1/blend_pool_rates?id=neq.${SINGLETON_ID}`, {
+      method: 'DELETE',
+      headers: {
+        apikey: SERVICE_ROLE_KEY,
+        Authorization: `Bearer ${SERVICE_ROLE_KEY}`,
+        Prefer: 'return=minimal',
+      },
+    });
+    if (!cleanup.ok) {
+      return new Response(JSON.stringify({ error: `cleanup failed: ${await cleanup.text()}` }), { status: 502 });
+    }
+
     return new Response(JSON.stringify({ apy }), { status: 200 });
   } catch (e) {
     return new Response(JSON.stringify({ error: String(e) }), { status: 500 });

@@ -1,4 +1,5 @@
 import { Ionicons } from '@expo/vector-icons';
+import { Image as CachedImage } from 'expo-image';
 import { router } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
@@ -22,7 +23,7 @@ import { isUsernameTaken, isValidEmail, normalizeUsername } from '@/lib/director
 import { colors, radius } from '@/lib/theme';
 import { useWallet } from '@/lib/wallet-context';
 
-const LOGO = require('../../assets/images/remitt logo/remitt_blk_horizontal.png');
+const LOGO_WELCOME = require('../../assets/images/pocket-icon-welcome.png');
 
 const CODE_LENGTH = 6;
 const RESEND_COOLDOWN_S = 30;
@@ -141,13 +142,18 @@ export default function Onboarding() {
           style={styles.container}
         >
           <View style={styles.welcomeHero}>
-            <Image source={LOGO} style={styles.logo} resizeMode="contain" />
+            <CachedImage
+              source={LOGO_WELCOME}
+              style={styles.logo}
+              contentFit="contain"
+              cachePolicy="memory"
+            />
             <Text style={styles.headline}>
-              Your digital dollars.{'\n'}
-              <Text style={{ color: colors.accentDark }}>Anywhere on earth.</Text>
+              Your digital world,{'\n'}
+              <Text style={{ color: colors.accentDark }}>in your pocket.</Text>
             </Text>
             <Text style={styles.sub}>
-              Send, receive, and save digital dollars instantly.{'\n'}No bank required.
+              Send, earn, and save digital dollars instantly.{'\n'}No bank required.
             </Text>
           </View>
           <Button
@@ -160,7 +166,7 @@ export default function Onboarding() {
           <Pressable onPress={() => router.push('/recover')} hitSlop={8}>
             <Text style={styles.recoverLink}>I already have an account</Text>
           </Pressable>
-          <Text style={styles.finePrint}>Free to open · No minimums · Cash out anytime</Text>
+          <Text style={styles.finePrint}>Free to open · No minimums · Transfer anytime</Text>
         </Animated.View>
       </SafeAreaView>
     );
@@ -178,7 +184,6 @@ export default function Onboarding() {
               <Pressable onPress={() => setStep('details')} hitSlop={12}>
                 <Ionicons name="arrow-back" size={26} color={colors.ink} />
               </Pressable>
-              <Image source={LOGO} style={styles.logoSmall} resizeMode="contain" />
               <View style={{ width: 26 }} />
             </View>
             <View style={styles.verifyCenter}>
@@ -239,7 +244,6 @@ export default function Onboarding() {
             <Pressable onPress={() => setStep('welcome')} hitSlop={12}>
               <Ionicons name="arrow-back" size={26} color={colors.ink} />
             </Pressable>
-            <Image source={LOGO} style={styles.logoSmall} resizeMode="contain" />
             <View style={{ width: 26 }} />
           </View>
           <Text style={styles.detailsTitle}>Set up your account</Text>
@@ -250,7 +254,7 @@ export default function Onboarding() {
                 <Image source={{ uri: avatarUri }} style={styles.avatarImage} />
               ) : (
                 <View style={styles.avatarPlaceholder}>
-                  <Ionicons name="camera-outline" size={22} color={colors.sub} />
+                  <Ionicons name="camera-outline" size={36} color={colors.sub} />
                 </View>
               )}
               <Text style={styles.avatarLabel}>{avatarUri ? 'Change photo' : 'Add a photo (optional)'}</Text>
@@ -301,7 +305,7 @@ export default function Onboarding() {
           <View style={{ flex: 1 }} />
           <Button title="Submit" onPress={submit} loading={creating} disabled={!ready} />
           <Text style={styles.finePrint}>
-            Free to open · No minimums · Cash out anytime
+            Free to open · No minimums · Transfer anytime
           </Text>
         </Animated.View>
       </KeyboardAvoidingView>
@@ -313,8 +317,7 @@ const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: colors.bg },
   container: { flex: 1, padding: 24 },
   welcomeHero: { flex: 1, alignItems: 'center', justifyContent: 'center' },
-  logo: { width: 180, height: 45, marginBottom: 36 },
-  logoSmall: { width: 96, height: 24 },
+  logo: { width: 280, height: 280, marginBottom: 36 },
   headline: {
     fontSize: 34,
     fontWeight: '800',
@@ -389,12 +392,12 @@ const styles = StyleSheet.create({
     fontSize: 15,
     marginTop: 16,
   },
-  avatarPick: { flexDirection: 'row', alignItems: 'center', gap: 12, alignSelf: 'center' },
-  avatarImage: { width: 56, height: 56, borderRadius: 28, backgroundColor: colors.border },
+  avatarPick: { flexDirection: 'column', alignItems: 'center', gap: 8, alignSelf: 'center' },
+  avatarImage: { width: 96, height: 96, borderRadius: 48, backgroundColor: colors.border },
   avatarPlaceholder: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: 96,
+    height: 96,
+    borderRadius: 48,
     backgroundColor: colors.card,
     borderWidth: 1,
     borderColor: colors.border,

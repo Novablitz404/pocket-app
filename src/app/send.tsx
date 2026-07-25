@@ -30,6 +30,10 @@ export default function Send() {
 
   const value = parseFloat(amount) || 0;
   const canSend = value > 0 && value <= balance && to.trim().length > 0;
+  // A raw Stellar address (vs. a Pocket username) means this is going to an
+  // external wallet, not another Pocket user — those sends are final, so
+  // warn before the amount pad even opens the possibility of a typo mistake.
+  const isExternalAddress = /^G[A-Z0-9]{55}$/.test(to.trim());
 
   const paste = async () => {
     const text = await Clipboard.getStringAsync();
@@ -143,6 +147,16 @@ export default function Send() {
           </Pressable>
         </View>
 
+        {isExternalAddress && (
+          <View style={styles.warnCard}>
+            <Ionicons name="warning-outline" size={18} color={colors.accentDark} />
+            <Text style={styles.warnText}>
+              Double-check this address — it&rsquo;s not a Pocket user. Sends to an external wallet are final and
+              cannot be reversed or refunded, not even by support.
+            </Text>
+          </View>
+        )}
+
         <AmountPad value={amount} onChange={setAmount} />
         <Button
           title={value > 0 ? `Send ${formatUsd(value)}` : 'Send'}
@@ -171,6 +185,16 @@ const styles = StyleSheet.create({
   favorite: { alignItems: 'center', gap: 6, maxWidth: 72 },
   favoriteLabel: { fontSize: 12, fontWeight: '600', color: colors.sub },
   recipientRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 16 },
+  warnCard: {
+    flexDirection: 'row',
+    gap: 8,
+    alignItems: 'flex-start',
+    marginBottom: 16,
+    padding: 14,
+    borderRadius: radius.md,
+    backgroundColor: colors.accentSoft,
+  },
+  warnText: { flex: 1, fontSize: 13, fontWeight: '500', color: colors.accentDark, lineHeight: 18 },
   input: {
     flex: 1,
     height: 52,

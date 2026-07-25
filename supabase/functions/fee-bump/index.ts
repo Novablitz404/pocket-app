@@ -40,15 +40,10 @@
 //               sendTransaction; caller keeps polling getTransaction itself
 //               (a public read, needs no secret, unchanged from earn-blend.ts).
 import { Buffer } from 'node:buffer';
-import { Keypair, Networks, TransactionBuilder, Transaction, hash, xdr } from 'npm:@stellar/stellar-sdk@^16';
+import { Keypair, TransactionBuilder, Transaction, hash, xdr } from 'npm:@stellar/stellar-sdk@^16';
 import { kmsSign, REMITT_KMS_PUBLIC } from '../_shared/kms.ts';
 import { displayName, notifyAddress } from '../_shared/notify.ts';
-
-const HORIZON_URL = 'https://horizon-testnet.stellar.org';
-const SOROBAN_RPC = 'https://soroban-testnet.stellar.org';
-const NETWORK_PASSPHRASE = Networks.TESTNET;
-const USDC_CODE = 'USDC';
-const USDC_ISSUER = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
+import { HORIZON_URL, NETWORK_PASSPHRASE, USDC_CODE, USDC_ISSUER, SOROBAN_RPC } from '../_shared/network-config.ts';
 // Mirrors stellar.ts's FEE_MEMO — marks Remitt's own internal fee collections
 // (e.g. the Earn withdrawal fee), which also land at the treasury but are NOT
 // user cash-outs, so they must NOT be enqueued as off-ramp payouts.

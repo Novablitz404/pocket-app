@@ -2,7 +2,6 @@ import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  Image,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -22,7 +21,6 @@ import { isValidEmail } from '@/lib/directory';
 import { colors, radius } from '@/lib/theme';
 import { useWallet } from '@/lib/wallet-context';
 
-const LOGO = require('../../assets/images/remitt logo/remitt_blk_horizontal.png');
 
 const CODE_LENGTH = 6;
 const RESEND_COOLDOWN_S = 30;
@@ -147,7 +145,6 @@ export default function Recover() {
               <Pressable onPress={() => setStep('email')} hitSlop={12}>
                 <Ionicons name="arrow-back" size={26} color={colors.ink} />
               </Pressable>
-              <Image source={LOGO} style={styles.logoSmall} resizeMode="contain" />
               <View style={{ width: 26 }} />
             </View>
             <View style={styles.center}>
@@ -190,7 +187,7 @@ export default function Recover() {
               disabled={code.length !== CODE_LENGTH}
               loading={busy}
             />
-            <Text style={styles.finePrint}>One more step after this: your Remitt passcode.</Text>
+            <Text style={styles.finePrint}>One more step after this: your Pocket passcode.</Text>
           </Animated.View>
         </KeyboardAvoidingView>
       </SafeAreaView>
@@ -206,13 +203,12 @@ export default function Recover() {
               <Pressable onPress={() => setStep('email')} hitSlop={12}>
                 <Ionicons name="arrow-back" size={26} color={colors.ink} />
               </Pressable>
-              <Image source={LOGO} style={styles.logoSmall} resizeMode="contain" />
               <View style={{ width: 26 }} />
             </View>
             <View style={styles.center}>
               <Text style={styles.title}>Enter your passcode</Text>
               <Text style={[styles.sub, { textAlign: 'center' }]}>
-                The 4-digit passcode you use to{'\n'}unlock Remitt.
+                The 4-digit passcode you use to{'\n'}unlock Pocket.
               </Text>
               {/* Same invisible-input trick as the code step; the digits render
                   as dots — it's a passcode, not a mailed code. */}
@@ -259,7 +255,6 @@ export default function Recover() {
             <Pressable onPress={() => router.back()} hitSlop={12}>
               <Ionicons name="arrow-back" size={26} color={colors.ink} />
             </Pressable>
-            <Image source={LOGO} style={styles.logoSmall} resizeMode="contain" />
             <View style={{ width: 26 }} />
           </View>
           <Text style={styles.title}>Recover your account</Text>
@@ -299,7 +294,6 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: 24,
   },
-  logoSmall: { width: 96, height: 24 },
   title: { fontSize: 28, fontWeight: '800', color: colors.ink },
   sub: { fontSize: 15, color: colors.sub, marginTop: 8, lineHeight: 22 },
   emailText: { color: colors.ink, fontWeight: '700' },

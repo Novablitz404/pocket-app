@@ -10,7 +10,8 @@ const cfg = readFileSync(new URL('../src/lib/stellar-config.ts', import.meta.url
 const pick = (n) => cfg.match(new RegExp(`${n} = '([^']+)'`))[1];
 const horizon = new Horizon.Server('https://horizon-testnet.stellar.org');
 const USDC = new Asset('USDC', pick('USDC_ISSUER'));
-const treasury = Keypair.fromSecret(pick('TREASURY_SECRET'));
+const { TREASURY_SECRET } = await import('./treasury-secret.mjs');
+const treasury = Keypair.fromSecret(TREASURY_SECRET);
 
 async function makeSponsoredUser(amount) {
   const user = Keypair.random();

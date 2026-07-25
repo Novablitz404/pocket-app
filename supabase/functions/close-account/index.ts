@@ -40,14 +40,11 @@
 //   verify_recovery_pin block in supabase-schema.sql; also needs the
 //   channel_accounts table + claim/release RPCs + a seeded pool)
 import { Buffer } from 'node:buffer';
-import { Asset, BASE_FEE, Horizon, Keypair, Networks, Operation, TransactionBuilder, xdr } from 'npm:@stellar/stellar-sdk@^16';
+import { Asset, BASE_FEE, Horizon, Keypair, Operation, TransactionBuilder, xdr } from 'npm:@stellar/stellar-sdk@^16';
 import { kmsSign, REMITT_KMS_PUBLIC } from '../_shared/kms.ts';
 import { claimChannel, releaseChannel } from '../_shared/channels.ts';
-
-const HORIZON_URL = 'https://horizon-testnet.stellar.org';
-const NETWORK_PASSPHRASE = Networks.TESTNET;
-const USDC_CODE = 'USDC';
-const USDC_ISSUER = 'GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5';
+import { feeBumpEnvelope } from '../_shared/feebump.ts';
+import { HORIZON_URL, NETWORK_PASSPHRASE, USDC_CODE, USDC_ISSUER } from '../_shared/network-config.ts';
 const USDC = new Asset(USDC_CODE, USDC_ISSUER);
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!;
@@ -162,7 +159,10 @@ Deno.serve(async (req) => {
       hint: Keypair.fromPublicKey(REMITT_KMS_PUBLIC).signatureHint(),
       signature: Buffer.from(kmsSig),
     }));
-    const result = await submitClassic(b64(tx.toEnvelope()));
+    // Treasury fee-bumps (it's the fee source only here — not an inner signer):
+    // the channel supplies the sequence number and pays no fee (pure sequence
+    // provider — see _shared/feebump.ts).
+    const result = await submitClassic(feeBumpEnvelope(tx, treasury, NETWORK_PASSPHRASE));
     return new Response(JSON.stringify(result), { status: 200 });
   } catch (e) {
     return new Response(JSON.stringify({ error: String(e) }), { status: 500 });

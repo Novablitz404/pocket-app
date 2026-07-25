@@ -423,6 +423,51 @@ select cron.schedule(
   $$
 );
 
+-- FX rates: one global snapshot (USD -> every currency in one row's JSONB),
+-- same single-writer/many-readers shape as blend_pool_rates above. Written by
+-- the record-fx-rates Edge Function (supabase/functions/record-fx-rates) on a
+-- schedule, so devices read a cached rate instead of every user's app hitting
+-- the external FX API itself for the same numbers. FX moves slowly (unlike
+-- Blend's APY), so this runs every 6 hours, not every 15 minutes.
+create table if not exists fx_rates (
+  id         uuid primary key default gen_random_uuid(),
+  base       text not null default 'USD',
+  rates      jsonb not null, -- { "PHP": 58.5, "EUR": 0.92, ... } — units per 1 USD
+  created_at timestamptz not null default now()
+);
+
+create index if not exists fx_rates_created_at_idx on fx_rates (created_at);
+
+alter table fx_rates enable row level security;
+
+drop policy if exists "fx_rates read" on fx_rates;
+create policy "fx_rates read" on fx_rates for select using (true);
+
+-- Shown to every user, so a forged row is a shared-integrity problem, same
+-- reasoning as blend_pool_rates. Only record-fx-rates (service_role, pg_cron)
+-- should write it.
+drop policy if exists "fx_rates insert" on fx_rates;
+revoke insert on fx_rates from anon, authenticated;
+
+create extension if not exists pg_cron with schema extensions;
+create extension if not exists pg_net with schema extensions;
+
+select cron.unschedule(jobid) from cron.job where jobname = 'record-fx-rates';
+
+select cron.schedule(
+  'record-fx-rates',
+  '0 */6 * * *',
+  $$
+  select net.http_post(
+    url := 'https://ggapuomnnocuumwrgfnt.supabase.co/functions/v1/record-fx-rates',
+    headers := jsonb_build_object(
+      'Authorization', 'Bearer REPLACE_WITH_ANON_OR_SERVICE_ROLE_KEY',
+      'Content-Type', 'application/json'
+    )
+  );
+  $$
+);
+
 -- Push notifications: one row per device (Expo push token), many devices per
 -- address. Written by the app on start; read by the sender's app to notify a
 -- payment recipient, and by scripts/send-announcement.mjs /
@@ -588,6 +633,46 @@ create index if not exists offramp_payouts_status_idx on public.offramp_payouts 
 alter table public.offramp_payouts enable row level security;
 revoke all on public.offramp_payouts from anon, authenticated;
 grant all on public.offramp_payouts to service_role;
+
+-- ---------------------------------------------------------------------------
+-- beta_invite_codes: gates account creation during the invite-only mainnet
+-- TestFlight/APK beta (public build links, controlled access via a one-time
+-- code instead). One row per tester, single-use. The admin portal's Invites
+-- page generates rows; redeem_invite_code() is the only way to consume one.
+create table if not exists public.beta_invite_codes (
+  id          uuid primary key default gen_random_uuid(),
+  code        text not null unique,
+  label       text,                    -- optional note (tester name/email)
+  redeemed_at timestamptz,
+  created_at  timestamptz not null default now()
+);
+alter table public.beta_invite_codes enable row level security;
+revoke all on public.beta_invite_codes from anon, authenticated;
+grant  all on public.beta_invite_codes to service_role;
+
+-- Atomic single-use redeem: the WHERE clause + row count is what prevents two
+-- concurrent redeems of the same code both succeeding (a plain
+-- select-then-update would race). Anon-callable, same trust level as
+-- verify_account below — the only thing a leaked call can do is burn one
+-- code's single use, not read/enumerate other codes.
+create or replace function public.redeem_invite_code(p_code text)
+returns boolean
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_rows int;
+begin
+  update beta_invite_codes
+  set redeemed_at = now()
+  where code = p_code and redeemed_at is null;
+  get diagnostics v_rows = row_count;
+  return v_rows > 0;
+end;
+$$;
+
+grant execute on function public.redeem_invite_code(text) to anon, authenticated;
 
 -- ---------------------------------------------------------------------------
 -- RLS FOLLOW-UP (Phase 3 residual — needs the per-user identity model, tracked

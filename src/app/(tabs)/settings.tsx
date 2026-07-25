@@ -195,7 +195,7 @@ export default function Settings() {
         <View style={styles.card}>
           <Row
             icon="log-out-outline"
-            label={closing ? 'Closing account…' : 'Close account & cash out'}
+            label={closing ? 'Closing account…' : 'Close account & transfer'}
             onPress={onCloseAccount}
             destructive
             loading={closing}

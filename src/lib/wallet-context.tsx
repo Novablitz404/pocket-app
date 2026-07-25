@@ -9,7 +9,9 @@ import type { Contact } from './contacts';
 import * as directory from './directory';
 import * as earnBlend from './earn-blend';
 import * as earnLedger from './earn-ledger';
+import * as fx from './fx';
 import * as push from './notifications';
+import * as onramp from './onramp';
 import { confirmPasscode } from './biometrics';
 import { clearPin } from './pin';
 import * as stellar from './stellar';
@@ -54,6 +56,12 @@ interface WalletState {
   email: string | null; // recovery/contact anchor collected at onboarding
   emailVerified: boolean; // inbox ownership proven via OTP (gates recovery)
   country: string | null; // ISO alpha-2; inferred at signup, user-overridable
+  /** Local currency to show alongside USD balances (e.g. "PHP"), or null if
+   *  there's none worth converting to for this user's country. */
+  localCurrency: string | null;
+  /** Units of localCurrency per 1 USD, from the shared FX snapshot (see
+   *  src/lib/fx.ts) — null until loaded or if unavailable. */
+  localRate: number | null;
   language: string | null; // preference only for now (no i18n yet)
   usernameChangedAt: number | null; // last change (ms epoch); gates the 30-day rule
   avatarUrl: string | null; // this user's profile picture (Supabase Storage)
@@ -61,8 +69,8 @@ interface WalletState {
   balance: number;
   activity: ActivityItem[];
   refreshing: boolean;
-  activated: boolean; // account created on-chain
-  accountVerified: boolean; // user has clicked "verify" — gates cash-in; triggers on-chain activation
+  activated: boolean; // account created on-chain (now happens at signup, not first cash-in)
+  accountVerified: boolean; // KYC-verified (placeholder until real coins.ph KYC lands) — will gate the coins.ph on/off-ramp, not deposits/withdrawals in general
   balanceLoaded: boolean; // first balance fetch has resolved
   contacts: Contact[]; // accounts we've exchanged P2P payments with (on-device)
   toggleFavorite: (address: string) => Promise<void>;
@@ -84,16 +92,20 @@ interface WalletState {
    *  session verifyEmailOtp just returned — proves which email was verified
    *  server-side, since mark_email_verified() derives the address from it. */
   confirmEmailVerified: (accessToken: string) => Promise<void>;
-  /** Placeholder verification (no real identity check yet) — activates the
-   *  account on-chain (channel-account pool, sponsored reserves + trustline)
-   *  and unlocks cash-in. Idempotent: a no-op if already verified. */
+  /** Placeholder KYC verification (no real identity check yet — real check
+   *  will be coins.ph). Does NOT touch on-chain activation (that happens at
+   *  account creation now); this only unlocks the coins.ph on/off-ramp once
+   *  wired in. Idempotent: a no-op if already verified. */
   verifyAccount: () => Promise<void>;
   refresh: () => Promise<void>;
   sendMoney: (to: string, amount: number) => Promise<void>;
-  addCash: (amount: number) => Promise<void>;
+  /** Opens a cash-in intent for `amount` USDC and returns the ₱ quote + deposit
+   *  target. Ensures the account is activated first. No money moves here —
+   *  delivery is server-side once the peso deposit is detected. */
+  addCash: (amount: number) => Promise<onramp.CashInIntent>;
   cashOut: (amount: number) => Promise<void>;
   earnDeposit: (amount: number) => Promise<void>;
-  earnWithdraw: () => Promise<{ withdrawn: number; fee: number }>;
+  earnWithdraw: (amount?: number) => Promise<{ withdrawn: number; fee: number }>;
   closeAccount: () => Promise<void>;
   reset: () => Promise<void>;
 }
@@ -108,6 +120,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [email, setEmail] = useState<string | null>(null);
   const [emailVerified, setEmailVerified] = useState(false);
   const [country, setCountryState] = useState<string | null>(null);
+  const [localRate, setLocalRate] = useState<number | null>(null);
   const [language, setLanguageState] = useState<string | null>(null);
   const [usernameChangedAt, setUsernameChangedAt] = useState<number | null>(null);
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
@@ -176,6 +189,26 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     })();
   }, []);
 
+  // Local currency is derived from country (rarely changes); the rate itself
+  // is a shared, slow-moving snapshot (see fx.ts), so it's fetched ONCE here
+  // keyed on the currency — not inside refresh(), which runs far more often
+  // (every send/deposit/withdraw) and would otherwise re-hit Supabase for a
+  // number that hasn't changed.
+  const localCurrency = useMemo(() => fx.currencyForCountry(country), [country]);
+  useEffect(() => {
+    if (!localCurrency) {
+      setLocalRate(null);
+      return;
+    }
+    let cancelled = false;
+    fx.getFxRate(localCurrency).then((rate) => {
+      if (!cancelled) setLocalRate(rate);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [localCurrency]);
+
   const refresh = useCallback(async () => {
     const pub = publicKey ?? (await SecureStore.getItemAsync(PUBLIC_KEY));
     if (!pub) return;
@@ -238,12 +271,17 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       const newEmail = directory.normalizeEmail(rawEmail);
       const country = deviceCountry();
 
-      // Instant: the wallet is generated locally. It is created on-chain (and
-      // its trustline opened) by the treasury on first cash-in.
+      // The keypair itself is generated locally (free); activation (sponsored
+      // reserves + USDC trustline + 2-of-3 multisig) now happens immediately
+      // here, at account creation, rather than being deferred to first
+      // cash-in — so every account is fully on-chain and ready to receive
+      // USDC (e.g. via the external-wallet address screen) the moment
+      // onboarding finishes, with no separate "Verify to unlock" step.
       setBalanceLoaded(false);
       const { publicKey: pub, secret } = stellar.createWallet();
       await SecureStore.setItemAsync(SECRET_KEY, secret);
       await SecureStore.setItemAsync(PUBLIC_KEY, pub);
+      await stellar.activateAccount(secret);
       // The photo was picked before the address existed; upload it now.
       // Best-effort: a failed upload shouldn't block opening the account
       // (the user can retry from Settings).
@@ -461,21 +499,17 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     await fn(secret);
   }, []);
 
-  // Placeholder verification: activates the account on-chain (channel-account
-  // pool, sponsored reserves + trustline) and unlocks cash-in. No real
-  // identity check yet — see verify_account in supabase-schema.sql for the
-  // known gap this needs closing before it gates anything with real stakes.
+  // Placeholder KYC verification — no real identity check yet (real check
+  // will be coins.ph). On-chain activation no longer lives here: every
+  // account is already activated at creation (see createAccount). This just
+  // flips the KYC flag that will gate the coins.ph on/off-ramp once wired in.
   const verifyAccount = useCallback(async () => {
     if (!publicKey) throw new Error('No account on this device');
     if (accountVerified) return;
-    if (!(await stellar.accountExists(publicKey))) {
-      await withSecret((secret) => stellar.activateAccount(secret));
-    }
     setAccountVerified(true);
     await AsyncStorage.setItem(ACCOUNT_VERIFIED_KEY, '1');
     auth.verifyAccount(publicKey).catch(() => {});
-    await refresh();
-  }, [publicKey, accountVerified, withSecret, refresh]);
+  }, [publicKey, accountVerified]);
 
   const sendMoney = useCallback(
     async (to: string, amount: number) => {
@@ -494,13 +528,19 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const addCash = useCallback(
     async (amount: number) => {
       if (!publicKey) throw new Error('No account on this device');
-      if (!accountVerified) {
-        throw new Error('Verify your account to enable cash-in.');
+      // Belt-and-suspenders: the account must be on-chain with a USDC trustline
+      // before an intent, or delivery would later 422. Activation now happens
+      // at account creation, so this only fires for a pre-existing account
+      // created before that change shipped.
+      if (!(await stellar.accountExists(publicKey))) {
+        await withSecret((secret) => stellar.activateAccount(secret));
+        await refresh();
       }
-      await withSecret((secret) => stellar.cashIn(publicKey, secret, amount));
-      await refresh();
+      // Open the intent. Delivery (and the balance change) happens later,
+      // server-side, once the peso deposit is detected — so no refresh here.
+      return onramp.createCashInIntent(publicKey, amount);
     },
-    [publicKey, accountVerified, withSecret, refresh],
+    [publicKey, withSecret, refresh],
   );
 
   const reset = useCallback(async () => {
@@ -539,6 +579,22 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     [publicKey, withSecret, refresh],
   );
 
+  // After real money movement (deposit/withdraw), chart the fresh position
+  // immediately — bypassing the focus-time snapshot throttle so the Earn chart
+  // updates live instead of waiting out the 15-minute cooldown. Best-effort.
+  const chartMovementNow = useCallback(async () => {
+    if (!publicKey) return;
+    try {
+      const [supplied, net] = await Promise.all([
+        earnBlend.getSupplied(publicKey),
+        earnLedger.getNetDeposited(publicKey),
+      ]);
+      await earnLedger.recordSnapshotNow(publicKey, supplied, net ?? 0);
+    } catch {
+      // The chart just gets its point at the next throttled snapshot instead.
+    }
+  }, [publicKey]);
+
   // Earn: supply the user's USDC into the Blend pool (Soroban, fee-bumped).
   const earnDeposit = useCallback(
     async (amount: number) => {
@@ -546,27 +602,36 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       if (amount > balance) throw new Error('Not enough balance');
       await withSecret((secret) => earnBlend.deposit(publicKey, secret, amount));
       await earnLedger.recordDeposit(publicKey, amount);
+      await chartMovementNow();
       await refresh();
     },
-    [publicKey, balance, withSecret, refresh],
+    [publicKey, balance, withSecret, refresh, chartMovementNow],
   );
 
-  // Earn: withdraw the whole Blend position back to the wallet, then collect
-  // the withdrawal fee to the treasury.
-  const earnWithdraw = useCallback(async () => {
+  // Earn: withdraw from the Blend position back to the wallet (the whole
+  // position when no amount is given), then collect the withdrawal fee to the
+  // treasury.
+  const earnWithdraw = useCallback(async (amount?: number) => {
     if (!publicKey) throw new Error('No account on this device');
     let result = { withdrawn: 0, fee: 0 };
     await withSecret(async (secret) => {
-      result = await earnBlend.withdrawAll(publicKey, secret);
+      result =
+        amount == null
+          ? await earnBlend.withdrawAll(publicKey, secret)
+          : await earnBlend.withdraw(publicKey, secret, amount);
       if (result.fee > 0.0000001) {
         // Memo-tagged so the fee transfer stays out of the activity feed.
         await stellar.cashOut(publicKey, secret, parseFloat(result.fee.toFixed(7)), stellar.FEE_MEMO);
       }
     });
-    await earnLedger.resetDeposits(publicKey);
+    // Full withdrawal empties the position (zero the principal); a partial one
+    // only reduces the recorded principal by what was taken.
+    if (amount == null) await earnLedger.resetDeposits(publicKey);
+    else await earnLedger.recordWithdrawal(publicKey, amount);
+    await chartMovementNow();
     await refresh();
     return result;
-  }, [publicKey, withSecret, refresh]);
+  }, [publicKey, withSecret, refresh, chartMovementNow]);
 
   // Close the account and reclaim reserves to the treasury, then wipe the
   // device. The treasury acts alone server-side (see closeAndReclaim), so the
@@ -613,6 +678,8 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       email,
       emailVerified,
       country,
+      localCurrency,
+      localRate,
       language,
       usernameChangedAt,
       avatarUrl,
@@ -646,7 +713,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       closeAccount,
       reset,
     }),
-    [loading, name, firstName, lastName, username, email, emailVerified, country, language, usernameChangedAt, avatarUrl, publicKey, balance, activity, refreshing, activated, accountVerified, balanceLoaded, contacts, toggleFavorite, nameFor, profileFor, createAccount, recoverExistingAccount, updateName, changeUsername, setCountry, setLanguage, changeAvatar, confirmEmailVerified, verifyAccount, refresh, sendMoney, addCash, cashOut, earnDeposit, earnWithdraw, closeAccount, reset],
+    [loading, name, firstName, lastName, username, email, emailVerified, country, localCurrency, localRate, language, usernameChangedAt, avatarUrl, publicKey, balance, activity, refreshing, activated, accountVerified, balanceLoaded, contacts, toggleFavorite, nameFor, profileFor, createAccount, recoverExistingAccount, updateName, changeUsername, setCountry, setLanguage, changeAvatar, confirmEmailVerified, verifyAccount, refresh, sendMoney, addCash, cashOut, earnDeposit, earnWithdraw, closeAccount, reset],
   );
 
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;

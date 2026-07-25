@@ -1,24 +1,24 @@
 {
   "expo": {
-    "name": "Remitt",
-    "slug": "remitt",
+    "name": "Pocket",
+    "slug": "pocket",
     "version": "1.0.0",
     "orientation": "portrait",
-    "icon": "./assets/images/icon.png",
-    "scheme": "remitt",
+    "icon": "./assets/pocket brand kit transparent/pocket_icon_lrg.png",
+    "scheme": "pocket",
     "userInterfaceStyle": "automatic",
     "ios": {},
     "android": {
       "adaptiveIcon": {
         "backgroundColor": "#FFFFFF",
-        "foregroundImage": "./assets/images/android-icon-foreground.png",
-        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+        "foregroundImage": "./assets/pocket brand kit transparent/pocket_icon_lrg.png",
+        "monochromeImage": "./assets/pocket brand kit transparent/pocket_icon_lrg.png"
       },
       "predictiveBackGestureEnabled": false
     },
     "web": {
       "output": "static",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/pocket brand kit transparent/pocket_icon_sml.png"
     },
     "plugins": [
       "expo-router",
@@ -26,7 +26,7 @@
         "expo-splash-screen",
         {
           "backgroundColor": "#FFFFFF",
-          "image": "./assets/images/splash-icon.png",
+          "image": "./assets/pocket brand kit transparent/pocket_icon_lrg.png",
           "imageWidth": 220
         }
       ],
@@ -34,13 +34,13 @@
       [
         "expo-local-authentication",
         {
-          "faceIDPermission": "Remitt uses Face ID to unlock the app and confirm payments."
+          "faceIDPermission": "Pocket uses Face ID to unlock the app and confirm payments."
         }
       ],
       [
         "expo-camera",
         {
-          "cameraPermission": "Remitt uses the camera to scan payment codes."
+          "cameraPermission": "Pocket uses the camera to scan payment codes."
         }
       ],
       "expo-font",

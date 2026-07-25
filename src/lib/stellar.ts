@@ -2,15 +2,17 @@
 // activity items only — Stellar is the invisible backend.
 //
 // Account model (mainnet-accurate):
-//   - New wallets are generated locally; nothing hits the chain until the
-//     first deposit (lazy activation).
-//   - On first deposit the treasury CREATES the account with SPONSORED
-//     RESERVES, so the user's account holds ZERO XLM. The treasury holds the
-//     reserves and reclaims them if the account is ever closed.
-//   - The treasury is added as a co-signer (weight 2) with thresholds
-//     low/med/high = 1/1/2. The user's own key (weight 1) transacts normally,
-//     but the treasury can FREEZE, RECOVER (re-key), and RECLAIM the account
-//     on its own — the custodial-with-recovery model.
+//   - New wallets are generated locally, then the account is CREATED on-chain
+//     at signup (see activateAccount) — not lazily on first deposit.
+//   - The treasury sponsors the base + trustline + signer RESERVES, so the
+//     user's account holds ZERO XLM. The treasury holds those reserves and
+//     reclaims them if the account is ever closed. It is NOT a signer on the
+//     account — it only sponsors reserves and pays gas.
+//   - Self-custodial 2-of-3: three weight-1 signers (the user's master key,
+//     Pocket's KMS/HSM-held signer, and the compliance signer) with all
+//     thresholds at 2. Any two can act; no single party can — the user can't
+//     send alone, and neither can Pocket. This backs recovery (re-key),
+//     freeze, and close without any one key ever having unilateral control.
 //   - Every user transaction is FEE-BUMPED by the treasury, so the user never
 //     needs XLM for fees either.
 import { Buffer } from 'buffer';

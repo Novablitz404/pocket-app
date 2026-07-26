@@ -61,3 +61,8 @@ scripts/custody-2of3/
 # editor / assistant local config
 .vscode/
 .claude/
+
+# Rust/Cargo build artifacts for the Soroban contracts (contracts/). The 1.3GB
+# target/ dir must never be committed, watched by Metro, or uploaded by EAS.
+contracts/target/
+contracts/**/target/

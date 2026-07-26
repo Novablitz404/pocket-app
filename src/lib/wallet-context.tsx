@@ -7,7 +7,7 @@ import { pickAndUploadAvatar, uploadAvatar } from './avatar';
 import * as contactsLib from './contacts';
 import type { Contact } from './contacts';
 import * as directory from './directory';
-import * as earnBlend from './earn-blend';
+import * as earnVault from './earn-vault';
 import * as earnLedger from './earn-ledger';
 import * as fx from './fx';
 import * as push from './notifications';
@@ -105,7 +105,7 @@ interface WalletState {
   addCash: (amount: number) => Promise<onramp.CashInIntent>;
   cashOut: (amount: number) => Promise<void>;
   earnDeposit: (amount: number) => Promise<void>;
-  earnWithdraw: (amount?: number) => Promise<{ withdrawn: number; fee: number }>;
+  earnWithdraw: (amount?: number) => Promise<{ withdrawn: number }>;
   closeAccount: () => Promise<void>;
   reset: () => Promise<void>;
 }
@@ -586,7 +586,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     if (!publicKey) return;
     try {
       const [supplied, net] = await Promise.all([
-        earnBlend.getSupplied(publicKey),
+        earnVault.getSupplied(publicKey),
         earnLedger.getNetDeposited(publicKey),
       ]);
       await earnLedger.recordSnapshotNow(publicKey, supplied, net ?? 0);
@@ -595,12 +595,12 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     }
   }, [publicKey]);
 
-  // Earn: supply the user's USDC into the Blend pool (Soroban, fee-bumped).
+  // Earn: deposit the user's USDC into the Pocket vault (Soroban, fee-bumped).
   const earnDeposit = useCallback(
     async (amount: number) => {
       if (!publicKey) throw new Error('No account on this device');
       if (amount > balance) throw new Error('Not enough balance');
-      await withSecret((secret) => earnBlend.deposit(publicKey, secret, amount));
+      await withSecret((secret) => earnVault.deposit(publicKey, secret, amount));
       await earnLedger.recordDeposit(publicKey, amount);
       await chartMovementNow();
       await refresh();
@@ -608,24 +608,22 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     [publicKey, balance, withSecret, refresh, chartMovementNow],
   );
 
-  // Earn: withdraw from the Blend position back to the wallet (the whole
-  // position when no amount is given), then collect the withdrawal fee to the
-  // treasury.
+  // Earn: withdraw from the vault position back to the wallet (the whole
+  // position when no amount is given). There is NO separate withdrawal fee
+  // anymore — Pocket's 12%-of-yield cut is share-price dilution inside the
+  // vault, so nothing extra is collected here.
   const earnWithdraw = useCallback(async (amount?: number) => {
     if (!publicKey) throw new Error('No account on this device');
-    let result = { withdrawn: 0, fee: 0 };
+    let result = { withdrawn: 0 };
     await withSecret(async (secret) => {
       result =
         amount == null
-          ? await earnBlend.withdrawAll(publicKey, secret)
-          : await earnBlend.withdraw(publicKey, secret, amount);
-      if (result.fee > 0.0000001) {
-        // Memo-tagged so the fee transfer stays out of the activity feed.
-        await stellar.cashOut(publicKey, secret, parseFloat(result.fee.toFixed(7)), stellar.FEE_MEMO);
-      }
+          ? await earnVault.withdrawAll(publicKey, secret)
+          : await earnVault.withdraw(publicKey, secret, amount);
     });
-    // Full withdrawal empties the position (zero the principal); a partial one
-    // only reduces the recorded principal by what was taken.
+    // The off-chain principal ledger still drives the "earned" display (the
+    // vault stores per-user shares, not per-user cost basis): a full
+    // withdrawal zeroes it, a partial one reduces it by what was taken.
     if (amount == null) await earnLedger.resetDeposits(publicKey);
     else await earnLedger.recordWithdrawal(publicKey, amount);
     await chartMovementNow();

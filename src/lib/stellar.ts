@@ -18,7 +18,7 @@
 import { Buffer } from 'buffer';
 import EventSource from 'react-native-sse';
 import { Account, Asset, BASE_FEE, Horizon, Keypair, Memo, Networks, Operation, TransactionBuilder } from '@stellar/stellar-sdk';
-import { POOL_ID as BLEND_POOL_ID } from './earn-blend.ts';
+import { POOL_ID as BLEND_POOL_ID, VAULT_ID } from './earn-vault.ts';
 import { ANON_KEY, SUPABASE_URL } from './directory.ts';
 import { HORIZON_URL, TREASURY_PUBLIC, USDC_CODE, USDC_ISSUER } from './stellar-config.ts';
 
@@ -374,18 +374,23 @@ export async function getActivity(publicKey: string): Promise<ActivityItem[]> {
   for (const record of res.records as any[]) {
     if (record.type === 'invoke_host_function') {
       // Soroban tx: USDC moved via the Stellar Asset Contract. The only ones
-      // we make are Blend pool deposits/withdrawals (Earn).
+      // we make are Earn moves. A DEPOSIT sends USDC user -> vault (the vault
+      // then supplies Blend on our behalf, a separate change not involving the
+      // user). A WITHDRAW has Blend pay the user directly from the POOL
+      // (to = user), so the counterparty differs by direction — treat both the
+      // vault and the pool as "Earn" addresses.
+      const EARN_ADDRS = [VAULT_ID, BLEND_POOL_ID];
       for (const [i, change] of (record.asset_balance_changes ?? []).entries()) {
         if (change.type !== 'transfer') continue;
         if (change.asset_code !== USDC_CODE || change.asset_issuer !== USDC_ISSUER) continue;
-        const toPool = change.from === publicKey && change.to === BLEND_POOL_ID;
-        const fromPool = change.from === BLEND_POOL_ID && change.to === publicKey;
-        if (!toPool && !fromPool) continue;
+        const toEarn = change.from === publicKey && EARN_ADDRS.includes(change.to);
+        const fromEarn = EARN_ADDRS.includes(change.from) && change.to === publicKey;
+        if (!toEarn && !fromEarn) continue;
         items.push({
           id: `${record.id}-${i}`,
-          kind: toPool ? 'earn-deposit' : 'earn-withdraw',
+          kind: toEarn ? 'earn-deposit' : 'earn-withdraw',
           amount: parseFloat(change.amount),
-          counterparty: BLEND_POOL_ID,
+          counterparty: toEarn ? change.to : change.from,
           createdAt: record.created_at,
           txHash: record.transaction_hash,
         });

@@ -14,7 +14,7 @@
 //
 // Run: node scripts/record-pool-rate.mjs
 import { readFileSync } from 'node:fs';
-import { getPoolApy } from '../src/lib/earn-blend.ts';
+import { getPoolApy } from '../src/lib/earn-vault.ts';
 
 const env = Object.fromEntries(
   readFileSync(new URL('../.env', import.meta.url), 'utf8')

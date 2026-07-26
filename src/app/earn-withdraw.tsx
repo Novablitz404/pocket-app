@@ -8,7 +8,7 @@ import { Button } from '@/components/button';
 import { MethodSheet } from '@/components/method-sheet';
 import { usePopup } from '@/components/popup';
 import { ensureUnlocked } from '@/lib/biometrics';
-import { WITHDRAW_FEE_RATE, getSupplied } from '@/lib/earn-blend';
+import { getSupplied } from '@/lib/earn-vault';
 import { colors, formatUsd, radius } from '@/lib/theme';
 import { useWallet } from '@/lib/wallet-context';
 
@@ -74,7 +74,7 @@ export default function Withdraw() {
       const result = await earnWithdraw(isFull ? undefined : value);
       const toBank = await popup.confirm({
         title: 'Withdrawn',
-        message: `${formatUsd(result.withdrawn - result.fee)} is back in your wallet. Transfer to GCash / bank now?`,
+        message: `${formatUsd(result.withdrawn)} is back in your wallet. Transfer to GCash / bank now?`,
         confirmText: 'Transfer',
       });
       if (toBank) {
@@ -144,7 +144,7 @@ export default function Withdraw() {
           style={{ marginTop: 8 }}
         />
         <Text style={styles.finePrint}>
-          A {(WITHDRAW_FEE_RATE * 100).toFixed(1)}% fee applies on withdrawal · {formatUsd(MIN_WITHDRAW)} minimum.
+          No withdrawal fee · {formatUsd(MIN_WITHDRAW)} minimum.
         </Text>
       </View>
 

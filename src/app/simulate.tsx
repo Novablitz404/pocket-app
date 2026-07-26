@@ -5,7 +5,7 @@ import { Animated, Easing, Modal, Pressable, StyleSheet, Text, View } from 'reac
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { AmountPad } from '@/components/amount-pad';
 import { usePopup } from '@/components/popup';
-import { FALLBACK_APY, getCachedPoolApy, getSupplied } from '@/lib/earn-blend';
+import { FALLBACK_APY, getCachedPoolApy, getSupplied } from '@/lib/earn-vault';
 import { formatLocal } from '@/lib/fx';
 import { colors, radius } from '@/lib/theme';
 import { type HomeRange, setPendingHomeRange } from '@/lib/ui-state';

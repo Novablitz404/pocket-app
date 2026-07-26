@@ -1,4 +1,4 @@
-import { getEarnState, getSupplied } from '../src/lib/earn-blend.ts';
+import { getEarnState, getSupplied } from '../src/lib/earn-vault.ts';
 
 const address = process.argv[2] ?? 'GBWIRENBNLKFPLJFJF3ETMUMAEEZWEDGMP6J4UFDC6YRTEZHO4KMUK2Q';
 const netDeposited = parseFloat(process.argv[3] ?? '39.95');

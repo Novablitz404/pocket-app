@@ -7,7 +7,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { usePopup } from '@/components/popup';
 import { type SnapshotPoint, SavingsChart, bucketize } from '@/components/savings-chart';
 import { Skeleton } from '@/components/skeleton';
-import { FALLBACK_APY, getEarnState } from '@/lib/earn-blend';
+import { FALLBACK_APY, getEarnState } from '@/lib/earn-vault';
 import { getNetDeposited, getSnapshots, maybeRecordSnapshot } from '@/lib/earn-ledger';
 import { formatLocal } from '@/lib/fx';
 import { colors, formatUsd, radius } from '@/lib/theme';

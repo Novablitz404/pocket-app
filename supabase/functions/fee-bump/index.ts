@@ -40,10 +40,10 @@
 //               sendTransaction; caller keeps polling getTransaction itself
 //               (a public read, needs no secret, unchanged from earn-blend.ts).
 import { Buffer } from 'node:buffer';
-import { Keypair, TransactionBuilder, Transaction, hash, xdr } from 'npm:@stellar/stellar-sdk@^16';
+import { Address, Keypair, TransactionBuilder, Transaction, hash, xdr } from 'npm:@stellar/stellar-sdk@^16';
 import { kmsSign, REMITT_KMS_PUBLIC } from '../_shared/kms.ts';
 import { displayName, notifyAddress } from '../_shared/notify.ts';
-import { HORIZON_URL, NETWORK_PASSPHRASE, USDC_CODE, USDC_ISSUER, SOROBAN_RPC } from '../_shared/network-config.ts';
+import { HORIZON_URL, NETWORK_PASSPHRASE, USDC_CODE, USDC_ISSUER, SOROBAN_RPC, VAULT_ID } from '../_shared/network-config.ts';
 // Mirrors stellar.ts's FEE_MEMO — marks Remitt's own internal fee collections
 // (e.g. the Earn withdrawal fee), which also land at the treasury but are NOT
 // user cash-outs, so they must NOT be enqueued as off-ramp payouts.
@@ -110,15 +110,30 @@ function assertClassicIsSend(inner: Transaction): void {
   }
 }
 
-/** A soroban inner tx we're willing to co-sign: only contract invokes (the
- *  Blend Earn deposit/withdraw path), sourced from the user. Deeper per-call
- *  validation is out of scope — the funds move within the user's own Blend
- *  position, a bounded risk vs. the classic drain vector. */
-function assertSorobanIsInvoke(inner: Transaction): void {
+/** A soroban inner tx we're willing to co-sign: only contract invokes of the
+ *  Pocket Earn VAULT specifically (the deposit/withdraw path). The vault now
+ *  pools ALL Earn users' USDC in one contract — far more TVL concentrated in
+ *  one place than the old per-user siloed Blend positions — so co-signing is
+ *  tightened from "any Soroban invoke" to "an invoke of exactly VAULT_ID":
+ *  the vault's own code is the only thing that ever touches the pooled funds,
+ *  and it exposes no raw passthrough, so allowlisting its address bounds what
+ *  a co-signature can ever authorize. Refuses create/upload host functions and
+ *  invokes of any other contract (e.g. calling Blend directly, or a look-alike
+ *  contract) outright. */
+function assertSorobanIsVaultInvoke(inner: Transaction): void {
   if (inner.operations.length === 0) throw new Error('nothing to co-sign');
+  if (!VAULT_ID) throw new Error('Earn vault not configured for this network — refusing to co-sign');
   for (const op of inner.operations) {
     if (op.type !== 'invokeHostFunction') {
       throw new Error(`refusing to co-sign a "${op.type}" op — only Soroban invokes`);
+    }
+    const hf: any = (op as any).func;
+    if (hf?.switch?.().name !== 'hostFunctionTypeInvokeContract') {
+      throw new Error('only contract invokes may be co-signed (no contract create/upload)');
+    }
+    const invoked = Address.fromScAddress(hf.invokeContract().contractAddress()).toString();
+    if (invoked !== VAULT_ID) {
+      throw new Error(`refusing to co-sign an invoke of ${invoked} — only the Earn vault (${VAULT_ID})`);
     }
   }
 }
@@ -264,7 +279,7 @@ Deno.serve(async (req) => {
     // Validate the inner tx is something we're willing to authorize, refuse to
     // co-sign frozen accounts, then add Remitt's KMS co-signature (weight 2).
     if (target === 'classic') assertClassicIsSend(inner);
-    else assertSorobanIsInvoke(inner);
+    else assertSorobanIsVaultInvoke(inner);
     await assertNotFrozen(inner.source);
     await coSignInner(inner);
 

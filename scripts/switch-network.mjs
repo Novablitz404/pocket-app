@@ -77,7 +77,14 @@ export const HORIZON_URL = '${cfg.HORIZON_URL}';
 export const NETWORK_PASSPHRASE = '${cfg.NETWORK_PASSPHRASE}';
 export const USDC_CODE = 'USDC';
 export const USDC_ISSUER = '${cfg.USDC_ISSUER}';
-export const TREASURY_PUBLIC = '${cfg.TREASURY_PUBLIC}';
+// The always-online operational G-account: sponsors reserves, fee-bumps, and is
+// the 2-of-3 co-signer on user accounts. Stage 2 names this role "Sponsor";
+// TREASURY_PUBLIC is kept as a back-compat alias (many scripts/Edge-Fn env vars
+// still reference the old name). The Treasury is now the CONTRACT (TREASURY_ID),
+// which holds accumulated fee revenue and funds the Sponsor's XLM off-chain via
+// sweep -> classic SDEX swap (scripts/fund-sponsor.mjs).
+export const SPONSOR_PUBLIC = '${cfg.TREASURY_PUBLIC}';
+export const TREASURY_PUBLIC = '${cfg.TREASURY_PUBLIC}'; // alias of SPONSOR_PUBLIC (legacy name)
 export const BLEND_POOL_ID = '${cfg.BLEND_POOL_ID}';
 export const VAULT_ID = '${cfg.VAULT_ID}';
 export const TREASURY_ID = '${cfg.TREASURY_ID}';

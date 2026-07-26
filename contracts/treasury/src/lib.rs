@@ -11,12 +11,18 @@
 //! logic can convert them to USDC and move them out — that is the whole
 //! reason the fee recipient is a contract rather than a plain G-account.
 //!
-//! v1 SCOPE — accumulator only (decided 2026-07-25): receive + custody fee
-//! revenue, let the admin realize accrued fee-shares into USDC and sweep
-//! USDC out. Funding the Sponsor G-account (fees are USDC, Sponsor needs
-//! XLM — a swap or a separately-topped-up XLM reserve) is deliberately NOT
-//! in this version; see the `blend-vault-treasury-sponsor-build-plan` memory
-//! note.
+//! SCOPE — accumulator: receive + custody fee revenue, let the admin realize
+//! accrued fee-shares into USDC (`claim_fees`/`claim_all_fees`) and move USDC
+//! out (`sweep`).
+//!
+//! Sponsor funding (Stage 2 split, 2026-07-26): fees are USDC but the Sponsor
+//! G-account needs XLM. This is handled entirely OFF-chain and needs NO code
+//! here — a Soroban contract cannot place classic offers/path payments, so the
+//! swap can't live in the contract anyway. Instead `sweep(to = Sponsor)` moves
+//! USDC to the Sponsor's classic account, which then swaps USDC -> XLM on the
+//! classic SDEX itself (scripts/fund-sponsor.mjs). Sweep only the top-up amount
+//! so fee revenue transiting the always-online Sponsor hot key stays bounded.
+//! See the `blend-vault-treasury-sponsor-build-plan` memory note.
 
 use soroban_sdk::{contract, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, Symbol, Val, Vec};
 
